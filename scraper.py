@@ -1,3 +1,4 @@
+import re
 import time
 from datetime import datetime, date
 from curl_cffi import requests
@@ -239,19 +240,121 @@ SITE_CONFIGS = {
         "selector_link": "a.base-card__full-link",
         "link_prefix": "",
     },
-    "kalibrr": {
-        "search_url": "https://www.kalibrr.com/id-ID/job-board/te/1",
-        "impersonate": "chrome120",
-        "needs_browser": True,  # kemungkinan besar render via JS, cek dulu
-        "selector_job_card": "div.k-card",          # PLACEHOLDER, verifikasi ulang
-        "selector_title": "h2, .job-title",           # PLACEHOLDER
-        "selector_company": ".company-name",          # PLACEHOLDER
-        "selector_location": ".job-location",          # PLACEHOLDER
-        "selector_link": "a",                           # PLACEHOLDER
-        "link_prefix": "https://www.kalibrr.com",
-    },
-    # Tambah situs lain di sini dengan pola yang sama.
+    # Kalibrr ditangani oleh scrape_kalibrr() khusus di bawah (bukan generic_html_scraper),
+    # karena dia butuh regex pola URL, bukan CSS selector biasa. Lihat penjelasan di sana.
 }
+
+# ==========================================
+# SCRAPER: KALIBRR.ID (HTML, pola URL job — bukan CSS class)
+# ==========================================
+# PENTING: pakai domain kalibrr.id (bukan kalibrr.com) supaya hasilnya
+# lowongan Indonesia, bukan Filipina. kalibrr.com melayani PH+ID+US campur,
+# sedangkan kalibrr.id adalah versi khusus Indonesia.
+#
+# Halamannya SSR (Next.js) — data lowongan sudah ada di HTML pertama kali
+# di-load, jadi TIDAK perlu Playwright, cukup requests + BeautifulSoup biasa.
+#
+# Strategi ekstraksi: alih-alih menebak nama class CSS (yang sering berubah
+# dan saya tidak bisa verifikasi langsung), saya pakai pola URL lowongan yang
+# stabil: /c/{slug-perusahaan}/jobs/{id-angka}/{slug-judul} (tanpa query string).
+# Ini jauh lebih tahan terhadap perubahan desain dibanding CSS class.
+
+KALIBRR_BASE = "https://www.kalibrr.id"
+KALIBRR_JOB_LINK_RE = re.compile(r'^(/c/[^/]+/jobs/(\d+)/[^?]+)$')
+
+
+def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
+    print("Mencari lowongan di Kalibrr...")
+    hasil = []
+    url = f"{KALIBRR_BASE}{path}"
+
+    try:
+        resp = requests.get(url, impersonate="chrome120", timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ Gagal fetch Kalibrr: {e}")
+        return hasil
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    seen_ids = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        path_only = href
+        for base in ("https://www.kalibrr.id", "https://www.kalibrr.com"):
+            if href.startswith(base):
+                path_only = href[len(base):]
+                break
+
+        m = KALIBRR_JOB_LINK_RE.match(path_only)
+        if not m:
+            continue
+
+        job_id = m.group(2)
+        if job_id in seen_ids:
+            continue
+
+        judul = a.get_text(strip=True)
+        if not judul:
+            continue
+        seen_ids.add(job_id)
+
+        # Nama perusahaan: anchor berikutnya setelah link judul biasanya link
+        # nama perusahaan (bukan logo, yang teksnya sering kosong karena cuma <img>).
+        perusahaan = "Tidak diketahui"
+        next_a = a.find_next("a", href=True)
+        if next_a:
+            teks = next_a.get_text(strip=True)
+            if teks:
+                perusahaan = teks
+
+        # Ambil teks blok sekitar untuk cari lokasi/gaji/tipe secara heuristik.
+        container = a
+        card_text = ""
+        for _ in range(6):
+            container = container.find_parent()
+            if container is None:
+                break
+            card_text = container.get_text(" ", strip=True)
+            if len(card_text) > 100:
+                break
+
+        lokasi_match = re.search(r'([A-Za-zÀ-ÿ .\'-]+,\s*Indonesia)', card_text)
+        lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
+
+        gaji_match = re.search(r'(IDR[\d.,]+\s*-\s*IDR[\d.,]+\s*/\s*month)', card_text)
+        gaji = gaji_match.group(1) if gaji_match else None
+
+        if "FULL_TIME" in card_text:
+            tipe = "full-time"
+        elif "PART_TIME" in card_text:
+            tipe = "part-time"
+        elif "CONTRACTOR" in card_text:
+            tipe = "kontrak"
+        else:
+            tipe = "unknown"
+
+        hasil.append({
+            "judul": judul,
+            "perusahaan": perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": tipe,
+            "kategori": None,
+            "deskripsi": "",
+            "gaji": gaji,
+            "sumber_platform": "kalibrr",
+            "sumber_url": f"{KALIBRR_BASE}{m.group(1)}",
+            "tanggal_post": date.today().isoformat(),
+        })
+
+        if len(hasil) >= limit:
+            break
+
+    if not hasil:
+        print("⚠️ 0 lowongan Kalibrr ditemukan. Kemungkinan halaman berubah struktur, "
+              "atau request diblokir. Jalankan debug_page_structure() untuk cek isi HTML mentahnya.")
+
+    return hasil
 
 
 def scrape_linkedin(keyword: str = "software engineer", location: str = "Indonesia",
@@ -469,11 +572,9 @@ def scrape_semua_sumber(limit_per_sumber: int = 5, keyword_linkedin: str = "soft
     time.sleep(1)
 
     semua_lowongan.extend(scrape_linkedin(keyword=keyword_linkedin, limit=limit_per_sumber))
+    time.sleep(1)
 
-    # Kalibrr sengaja tidak diikutkan otomatis dulu — selector-nya masih placeholder,
-    # isi dulu SITE_CONFIGS["kalibrr"], baru aktifkan baris di bawah ini:
-    # time.sleep(1)
-    # semua_lowongan.extend(generic_playwright_scraper("kalibrr", limit=limit_per_sumber))
+    semua_lowongan.extend(scrape_kalibrr(limit=limit_per_sumber))
 
     return semua_lowongan
 
