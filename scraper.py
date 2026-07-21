@@ -105,26 +105,15 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 # ==========================================
 GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
 
-# Generate device_id palsu agar Glints mengira ini sesi user baru
-dummy_device_id = str(uuid.uuid4())
-
+# Bersihkan Header! 
+# Jangan masukkan User-Agent, Cookie, atau sec-ch-ua secara manual.
+# Biarkan curl_cffi yang menyuntikkannya secara otomatis agar tidak "belang".
 GLINTS_HEADERS = {
     "Accept": "*/*",
-    "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
     "Content-Type": "application/json",
     "Origin": "https://glints.com",
     "Referer": "https://glints.com/id/opportunities/jobs/explore",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
     "x-glints-country-code": "ID",
-    # Header keamanan browser (sangat penting untuk bypass WAF)
-    "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    # Kirimkan device_id palsu
-    "Cookie": f"device_id={dummy_device_id};"
 }
 
 GRAPHQL_QUERY = """
@@ -180,11 +169,25 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
         "query": GRAPHQL_QUERY
     }
 
+    # 1. BUKA SESI BROWSER VIRTUAL
+    # Impersonate diset di level sesi agar konsisten dari awal sampai akhir
+    session = requests.Session(impersonate="chrome120")
+
     try:
-        # Gunakan impersonate versi yang lebih baru (chrome120) agar sinkron dengan Header sec-ch-ua di atas
-        resp = requests.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15, impersonate="chrome120")
+        # 2. PANCING COOKIES
+        # Kunjungi halaman web aslinya dulu untuk mendapatkan tiket/cookie keamanan
+        session.get("https://glints.com/id/opportunities/jobs/explore", timeout=15)
+        
+        # Jeda 1 detik, pura-puranya user sedang scroll/membaca halaman
+        time.sleep(1)
+
+        # 3. TEMBAK API
+        # Gunakan session.post (BUKAN requests.post). 
+        # Ini akan membawa semua cookies dari langkah ke-2!
+        resp = session.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
+        
     except Exception as e:
         print(f"❌ Gagal fetch API Glints: {e}")
         return hasil
