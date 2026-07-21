@@ -1,8 +1,8 @@
 """
 Modul untuk memproses data mentah hasil scraping menggunakan OpenAI:
 - Membersihkan & merapikan teks
-- Mengkategorikan (kategori pekerjaan)
-- Memilih top-N lowongan paling relevan/berkualitas per hari
+- Mengkategorikan lowongan
+- Memilih lowongan terbaik tanpa membuang terlalu banyak data
 """
 
 import os
@@ -16,68 +16,100 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def filter_dan_rangkum(lowongan_mentah: list[dict], jumlah: int = 10) -> list[dict]:
+def bersihkan_dan_rangkum(lowongan_mentah: list[dict], jumlah: int = 10) -> list[dict]:
     """
-    Kirim daftar lowongan mentah ke OpenAI, minta hasil:
-    - dibersihkan teksnya (judul & deskripsi rapi)
-    - dikategorikan (mis. IT, Marketing, Finance, Admin, dst)
-    - dipilih {jumlah} lowongan terbaik/paling jelas & lengkap informasinya
+    Membersihkan data lowongan hasil scraping menggunakan OpenAI.
 
-    Return list of dict siap disimpan ke DB (field sama dengan skema tabel `lowongan`).
+    Output:
+    - Judul dan deskripsi lebih rapi
+    - Tambahan kategori pekerjaan
+    - Duplikat dibuang
+    - Data valid dipertahankan sebanyak mungkin
     """
+
     if not lowongan_mentah:
         return []
 
-    # Kirim data mentah sebagai JSON ke model, minta output JSON juga
     input_data = json.dumps(lowongan_mentah, ensure_ascii=False)
 
     system_prompt = f"""
-Kamu adalah asisten yang membantu merapikan data lowongan kerja hasil scraping.
+Bersihkan data lowongan kerja hasil scraping.
 
-Tugas kamu:
-1. Bersihkan judul & deskripsi dari karakter aneh/typo/whitespace berlebih.
-2. Tentukan kategori pekerjaan yang sesuai (contoh: "IT & Software", "Marketing",
-   "Finance & Accounting", "Customer Service", "Human Resources", "Sales",
-   "Operations", "Design", "Lainnya").
-3. Buang entri yang datanya terlalu tidak lengkap (judul kosong / perusahaan tidak jelas).
-4. Buang entri yang terlihat duplikat satu sama lain (judul & perusahaan sama).
-5. Pilih maksimal {jumlah} lowongan TERBAIK (paling lengkap & jelas informasinya)
-   dari data yang diberikan.
+Tugas:
+1. Rapikan judul, perusahaan, lokasi, dan deskripsi.
+2. Tentukan kategori pekerjaan.
+3. Hapus hanya:
+   - judul kosong
+   - perusahaan kosong/tidak jelas
+   - duplikat sama persis
+   - bukan lowongan kerja
 
-PENTING: Balas HANYA dengan JSON array yang valid, tanpa teks pembuka/penutup,
-tanpa markdown code fence. Setiap elemen array harus punya field persis berikut:
-judul, perusahaan, lokasi, tipe_kerja, kategori, deskripsi, gaji, sumber_platform,
-sumber_url, tanggal_post.
+Jangan hapus data hanya karena:
+- gaji kosong
+- lokasi kosong
+- deskripsi kosong
 
-Field tipe_kerja harus salah satu dari: "full-time", "part-time", "remote", "kontrak", "magang".
-Field gaji boleh null kalau tidak ada informasinya.
-Field deskripsi maksimal 2-3 kalimat ringkas.
+Gunakan null atau "Tidak disebutkan" jika data tidak tersedia.
+Pilih maksimal {jumlah} lowongan terbaik, tetapi pertahankan sebanyak mungkin data valid.
+
+Output JSON array saja tanpa markdown.
+
+Field wajib:
+judul, perusahaan, lokasi, tipe_kerja, kategori,
+deskripsi, gaji, sumber_platform,
+sumber_url, tanggal_post
+
+Kategori contoh:
+IT & Software, Marketing, Finance & Accounting,
+Customer Service, Human Resources, Sales,
+Operations, Design, Lainnya
+
+tipe_kerja hanya:
+full-time, part-time, remote, kontrak, magang.
 """
 
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": system_prompt},
-            {"role": "user", "content": input_data},
-        ],
-        temperature=0.3,
-    )
-
-    hasil_teks = response.choices[0].message.content.strip()
-
-    # Bersihkan andai model tetap membungkus dengan markdown fence
-    if hasil_teks.startswith("```"):
-        hasil_teks = hasil_teks.strip("`")
-        if hasil_teks.startswith("json"):
-            hasil_teks = hasil_teks[4:].strip()
-
     try:
+        response = client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {
+                    "role": "system",
+                    "content": system_prompt
+                },
+                {
+                    "role": "user",
+                    "content": input_data
+                }
+            ],
+            temperature=0.2,
+            response_format={
+                "type": "json_object"
+            }
+        )
+
+        hasil_teks = response.choices[0].message.content.strip()
+
         hasil = json.loads(hasil_teks)
+
+        # Handle jika AI membungkus response
         if isinstance(hasil, dict):
-            # jaga-jaga kalau model bungkus dalam {"data": [...]}
-            hasil = hasil.get("data") or hasil.get("lowongan") or []
+            hasil = (
+                hasil.get("data")
+                or hasil.get("lowongan")
+                or hasil.get("jobs")
+                or []
+            )
+
+        if not isinstance(hasil, list):
+            return []
+
         return hasil[:jumlah]
+
     except json.JSONDecodeError as e:
-        print(f"❌ Gagal parse JSON dari OpenAI: {e}")
-        print(f"Raw response: {hasil_teks[:500]}")
+        print(f"❌ JSON OpenAI tidak valid: {e}")
+        print(response.choices[0].message.content[:500])
+        return []
+
+    except Exception as e:
+        print(f"❌ Error OpenAI: {e}")
         return []
