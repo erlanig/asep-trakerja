@@ -3,17 +3,21 @@ Modul untuk memproses data mentah hasil scraping menggunakan OpenAI:
 - Membersihkan & merapikan teks
 - Mengkategorikan lowongan
 - Memilih lowongan terbaik tanpa membuang terlalu banyak data
+
+Versi dengan pemrosesan chunk paralel (async) agar lebih cepat.
 """
 
 import os
 import json
 import math
-from openai import OpenAI
+import asyncio
+from openai import AsyncOpenAI
 from dotenv import load_dotenv
 
 load_dotenv()
 
-client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
+# Client async untuk pemrosesan paralel
+client = AsyncOpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 # Ukuran per-batch ke OpenAI. Dulu 1 batch besar (~100 item) rawan bikin
@@ -54,9 +58,9 @@ def _lengkapi_field(item: dict) -> dict:
     return item
 
 
-def _proses_chunk(chunk: list[dict]) -> list[dict]:
+async def _proses_chunk_async(chunk: list[dict]) -> list[dict]:
     """
-    Kirim satu chunk ke OpenAI untuk dibersihkan.
+    Kirim satu chunk ke OpenAI secara asynchronous untuk dibersihkan.
     Kalau chunk ini gagal (error API / JSON tidak valid), kembalikan list
     kosong HANYA untuk chunk ini -- bukan menghapus seluruh hasil.
     """
@@ -117,7 +121,7 @@ full-time, part-time, remote, kontrak, magang
 
     response = None
     try:
-        response = client.chat.completions.create(
+        response = await client.chat.completions.create(
             model=MODEL,
             messages=[
                 {"role": "system", "content": system_prompt},
@@ -165,12 +169,12 @@ full-time, part-time, remote, kontrak, magang
         return []
 
 
-def bersihkan_dan_rangkum(
+async def bersihkan_dan_rangkum_async(
     lowongan_mentah: list[dict],
     jumlah: int | None = None,
 ) -> list[dict]:
     """
-    Membersihkan data lowongan hasil scraping menggunakan OpenAI.
+    Membersihkan data lowongan hasil scraping menggunakan OpenAI (versi async).
 
     jumlah:
         None (default) -> kembalikan SEMUA lowongan valid, tidak dipotong.
@@ -179,29 +183,46 @@ def bersihkan_dan_rangkum(
                             bukan lewat instruksi "ranking terbaik" ke LLM,
                             supaya tidak ada bias pembuangan data valid).
     """
-
     if not lowongan_mentah:
         return []
 
     lowongan_dipangkas = _pangkas_deskripsi(lowongan_mentah)
 
-    jumlah_chunk = math.ceil(len(lowongan_dipangkas) / UKURAN_CHUNK)
-    hasil_gabungan: list[dict] = []
+    # Bagi ke dalam chunk
+    chunks = [
+        lowongan_dipangkas[i:i + UKURAN_CHUNK]
+        for i in range(0, len(lowongan_dipangkas), UKURAN_CHUNK)
+    ]
 
-    for i in range(jumlah_chunk):
-        chunk = lowongan_dipangkas[i * UKURAN_CHUNK : (i + 1) * UKURAN_CHUNK]
-        hasil_chunk = _proses_chunk(chunk)
-        if not hasil_chunk and chunk:
+    # Kirim semua chunk secara paralel
+    tasks = [_proses_chunk_async(chunk) for chunk in chunks]
+    hasil_per_chunk = await asyncio.gather(*tasks, return_exceptions=True)
+
+    hasil_gabungan: list[dict] = []
+    for i, res in enumerate(hasil_per_chunk):
+        if isinstance(res, list):
+            hasil_gabungan.extend(res)
+        else:
             print(
-                f"⚠️ Chunk {i + 1}/{jumlah_chunk} ({len(chunk)} item) gagal "
-                f"diproses dan dilewati -- item lain tetap diproses."
+                f"⚠️ Chunk {i + 1}/{len(chunks)} ({len(chunks[i])} item) gagal "
+                f"diproses dan dilewati -- error: {res}"
             )
-        hasil_gabungan.extend(hasil_chunk)
 
     if jumlah is not None and jumlah > 0:
         return hasil_gabungan[:jumlah]
 
     return hasil_gabungan
+
+
+def bersihkan_dan_rangkum(
+    lowongan_mentah: list[dict],
+    jumlah: int | None = None,
+) -> list[dict]:
+    """
+    Versi sinkron (wrapper) dari fungsi async.
+    Dapat dipanggil dari kode sinkron biasa tanpa event loop yang berjalan.
+    """
+    return asyncio.run(bersihkan_dan_rangkum_async(lowongan_mentah, jumlah))
 
 
 # Alias agar script lama tetap berjalan
