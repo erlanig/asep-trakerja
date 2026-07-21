@@ -55,15 +55,33 @@ def simpan_lowongan(lowongan: dict) -> bool:
             conn.close()
 
 
-def ambil_lowongan_belum_kirim(limit: int = 10) -> list[dict]:
+def ambil_lowongan_belum_kirim(limit: int = 10, tipe_kerja: str | None = None) -> list[dict]:
+    """
+    Ambil lowongan berstatus 'belum' terkirim.
+    `tipe_kerja`:
+      - None (default)  -> semua tipe (perilaku lama)
+      - "magang"         -> hanya lowongan magang
+      - "!magang"        -> semua KECUALI magang (dipakai untuk pesan "reguler")
+    Dipakai untuk memisah pengiriman jadi 2 pesan: lowongan kerja reguler
+    dan lowongan magang.
+    """
     conn = None
     try:
         conn = get_connection()
         cursor = conn.cursor(dictionary=True)
+
+        if tipe_kerja == "magang":
+            where_tipe = "AND tipe_kerja = 'magang'"
+        elif tipe_kerja == "!magang":
+            where_tipe = "AND (tipe_kerja IS NULL OR tipe_kerja <> 'magang')"
+        else:
+            where_tipe = ""
+
         cursor.execute(
-            """
+            f"""
             SELECT * FROM lowongan
             WHERE status_kirim = 'belum'
+            {where_tipe}
             ORDER BY tanggal_post DESC, created_at DESC
             LIMIT %s
             """,

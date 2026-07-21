@@ -27,8 +27,18 @@ def bersihkan_dan_rangkum(
     if not lowongan_mentah:
         return []
 
+    # Batch bisa sampai ~100 item sekarang (versus ~10-20 sebelumnya), jadi
+    # deskripsi dipangkas dulu supaya ukuran payload & biaya token tetap
+    # wajar. 500 karakter cukup untuk OpenAI merangkum tanpa kehilangan inti.
+    lowongan_dipangkas = []
+    for lo in lowongan_mentah:
+        lo_ringkas = dict(lo)
+        if lo_ringkas.get("deskripsi"):
+            lo_ringkas["deskripsi"] = lo_ringkas["deskripsi"][:500]
+        lowongan_dipangkas.append(lo_ringkas)
+
     input_data = json.dumps(
-        lowongan_mentah,
+        lowongan_dipangkas,
         ensure_ascii=False
     )
 
@@ -50,6 +60,12 @@ Jangan hapus karena:
 - deskripsi kosong
 
 Jika data kosong gunakan null atau "Tidak disebutkan".
+
+PENTING soal tipe_kerja "magang": kalau judul/deskripsi menyebut magang,
+internship, PKL, praktik kerja, trainee, atau apprentice, tipe_kerja WAJIB
+diisi "magang" — jangan diubah jadi "full-time"/"part-time"/"kontrak" hanya
+karena platform asal tidak melabelinya secara eksplisit. Jangan buang
+lowongan magang; perlakukan setara dengan lowongan reguler lainnya.
 
 Ambil maksimal {jumlah} lowongan terbaik.
 Pertahankan sebanyak mungkin data valid.

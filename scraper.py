@@ -206,6 +206,100 @@ def dedup_lowongan(daftar: list[dict]) -> list[dict]:
 
 
 # ==========================================
+# KLASIFIKASI MAGANG & FILTER RENTANG TANGGAL
+# ==========================================
+# Kata kunci ini dicek di judul + kategori + deskripsi (bukan cuma judul),
+# karena banyak platform (mis. Karir.com, LinkedIn, RemoteOK) tidak punya
+# field tipe_kerja yang eksplisit "intern"/"magang" — labelnya kadang cuma
+# muncul di badan deskripsi ("posisi magang", "internship program", dst).
+_KATA_KUNCI_MAGANG = [
+    "magang", "internship", "intern ", " intern", "pkl", "praktik kerja",
+    "kerja praktik", "kerja praktek", "trainee", "management trainee",
+    "apprentice", "apprenticeship", "co-op", "student program",
+]
+
+HARI_RENTANG_DEFAULT = 30  # ambil lowongan yang di-post dalam N hari terakhir
+
+
+def _teks_mengandung_magang(*potongan_teks: str | None) -> bool:
+    gabungan = " ".join(t for t in potongan_teks if t).lower()
+    return any(k in gabungan for k in _KATA_KUNCI_MAGANG)
+
+
+def klasifikasi_ulang_tipe_kerja(item: dict) -> dict:
+    """
+    Jaring pengaman: kalau tipe_kerja platform asli tidak menyebut magang
+    padahal teksnya jelas soal magang/internship/PKL/trainee, timpa jadi
+    'magang'. Ini dijalankan untuk SEMUA sumber (bukan cuma yang sudah
+    punya deteksi magang bawaan), supaya klasifikasi konsisten lintas
+    platform sebelum data dipisah jadi 2 pesan (reguler vs magang).
+    """
+    if item.get("tipe_kerja") == "magang":
+        return item
+    if _teks_mengandung_magang(item.get("judul"), item.get("kategori"), item.get("deskripsi")):
+        item["tipe_kerja"] = "magang"
+    return item
+
+
+def _dalam_rentang_hari(tanggal_iso: str | None, hari: int = HARI_RENTANG_DEFAULT) -> bool:
+    """
+    True kalau tanggal_post ada di rentang [hari ini - hari, hari ini].
+    Ini SENGAJA tidak mensyaratkan lowongan baru "hari ini" — banyak
+    lowongan bagus tetap terbuka lebih dari sehari, jadi kita ambil semua
+    yang di-post dalam N hari terakhir (default 30 hari) daripada cuma
+    yang tanggal post-nya persis hari ini.
+
+    Catatan soal tanggal tutup/deadline: sebagian besar sumber publik yang
+    dipakai scraper ini (karir.com, Glints, JobStreet, Kalibrr, Dealls,
+    LinkedIn guest API, RemoteOK, Arbeitnow, Remotive, Jobicy, Himalayas,
+    WWR, Greenhouse, Lever) TIDAK mengekspos tanggal tutup lowongan di
+    endpoint publik yang dipakai di sini — jadi filter "jangan yang tutup
+    hari ini / minimal H+1" tidak bisa dijamin dari sisi scraping. Sebagai
+    proxy yang realistis, kita pakai rentang tanggal POSTING (30 hari
+    terakhir) supaya tidak mengambil lowongan basi yang kemungkinan besar
+    sudah/hampir tutup. Kalau di masa depan sebuah sumber ternyata
+    menyediakan field deadline, tinggal tambahkan pengecekan
+    `deadline >= besok` di sini.
+    """
+    if not tanggal_iso:
+        return True  # tidak ada info tanggal -> jangan buang, biarkan lolos
+    try:
+        tgl = datetime.fromisoformat(tanggal_iso).date()
+    except ValueError:
+        return True
+    selisih = (date.today() - tgl).days
+    return -1 <= selisih <= hari  # -1 supaya tanggal "besok" (zona waktu beda) tetap lolos
+
+
+def pasca_proses(
+    daftar: list[dict],
+    hari_rentang: int = HARI_RENTANG_DEFAULT,
+) -> list[dict]:
+    """
+    Tahap akhir sebelum data dikirim ke AI filter:
+    1. Klasifikasi ulang tipe_kerja (deteksi magang yang terlewat).
+    2. Buang lowongan yang tanggal post-nya di luar rentang N hari terakhir.
+    3. Dedup ulang (klasifikasi ulang bisa saja menyatukan variasi judul).
+    """
+    diklasifikasi = [klasifikasi_ulang_tipe_kerja(item) for item in daftar]
+    dalam_rentang = [
+        item for item in diklasifikasi
+        if _dalam_rentang_hari(item.get("tanggal_post"), hari_rentang)
+    ]
+    dibuang = len(diklasifikasi) - len(dalam_rentang)
+    if dibuang:
+        log.info("    → %d lowongan dibuang (di luar rentang %d hari terakhir)", dibuang, hari_rentang)
+    return dedup_lowongan(dalam_rentang)
+
+
+def pisahkan_magang(daftar: list[dict]) -> tuple[list[dict], list[dict]]:
+    """Pisahkan satu daftar lowongan menjadi (reguler, magang)."""
+    reguler = [item for item in daftar if item.get("tipe_kerja") != "magang"]
+    magang = [item for item in daftar if item.get("tipe_kerja") == "magang"]
+    return reguler, magang
+
+
+# ==========================================
 # SCRAPER: KARIR.COM (API) — tidak berubah, sudah stabil
 # ==========================================
 KARIR_BASE_API = "https://gateway2-beta.karir.com"
@@ -1136,6 +1230,15 @@ DEALLS_SEARCH_PATHS = [
     "/loker/populer/loker-admin-jakarta",
 ]
 
+# Path khusus untuk kategori magang — mengikuti pola URL yang sama dengan
+# DEALLS_SEARCH_PATHS di atas. Verifikasi ulang slug ini kalau Dealls
+# mengubah struktur URL kategorinya.
+DEALLS_SEARCH_PATHS_MAGANG = [
+    "/loker/populer/loker-magang-jakarta",
+    "/loker/populer/loker-magang-bandung",
+    "/loker/populer/loker-internship-jakarta",
+]
+
 
 def _scrape_dealls_satu_path(path: str, session, limit: int) -> list[dict]:
     hasil = []
@@ -1204,12 +1307,14 @@ def _scrape_dealls_satu_path(path: str, session, limit: int) -> list[dict]:
     return hasil
 
 
-def scrape_dealls(path: str | None = None, limit: int = 20) -> list[dict]:
+def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[str] | None = None) -> list[dict]:
     """
     `path`: kalau diisi manual, hanya fetch path itu (perilaku versi lama).
-    Kalau None (default), scraper jalan lewat beberapa kategori populer
-    sekaligus (DEALLS_SEARCH_PATHS) supaya bisa tembus `limit` yang lebih
-    tinggi tanpa mentok di 1-2 lowongan seperti sebelumnya.
+    `daftar_path`: override daftar path yang dipakai kalau `path` kosong
+    (dipakai untuk fokus ke kategori magang lewat DEALLS_SEARCH_PATHS_MAGANG).
+    Kalau keduanya None (default), scraper jalan lewat beberapa kategori
+    populer sekaligus (DEALLS_SEARCH_PATHS) supaya bisa tembus `limit` yang
+    lebih tinggi tanpa mentok di 1-2 lowongan seperti sebelumnya.
     """
     log.info("Mencari lowongan di Dealls...")
     impersonate = _random_impersonate()
@@ -1220,7 +1325,7 @@ def scrape_dealls(path: str | None = None, limit: int = 20) -> list[dict]:
     else:
         hasil = []
         seen_url = set()
-        for p in DEALLS_SEARCH_PATHS:
+        for p in (daftar_path or DEALLS_SEARCH_PATHS):
             if len(hasil) >= limit:
                 break
             for job in _scrape_dealls_satu_path(p, session, limit):
@@ -1431,87 +1536,140 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
 # ==========================================
 # AGGREGATOR UTAMA
 # ==========================================
+# Kata kunci dipakai untuk pass kedua khusus magang di sumber-sumber yang
+# mendukung pencarian keyword (JobStreet, LinkedIn, RemoteOK, Arbeitnow,
+# Remotive, Jobicy, Himalayas). Ini penting karena keyword utama biasanya
+# "software engineer" dkk yang jarang menangkap lowongan magang — tanpa
+# pass kedua ini, magang cuma kebagian sisa dari deteksi teks pasif.
+KEYWORD_MAGANG_DEFAULT = "magang internship"
+
+
 def scrape_semua_sumber(
-    limit_per_sumber: int = 20,
+    limit_per_sumber: int = 40,
+    limit_magang_per_sumber: int = 20,
     keyword_linkedin: str = "software engineer",
+    keyword_magang: str = KEYWORD_MAGANG_DEFAULT,
     limits: dict | None = None,
     sertakan_ats: bool = True,
+    sertakan_pass_magang: bool = True,
+    hari_rentang: int = HARI_RENTANG_DEFAULT,
 ) -> list[dict]:
     """
-    `limits`: override limit per sumber, mis. {"linkedin": 30, "remotive": 15}.
-    Sumber yang tidak disebut memakai `limit_per_sumber`. LinkedIn & sumber
-    remote diberi default lebih tinggi karena tidak terlalu rawan diblokir
-    dan justru butuh limit besar untuk kelihatan hasilnya (LinkedIn perlu
-    paginasi untuk itu, sudah ditangani di scrape_linkedin).
+    Mengumpulkan lowongan dari semua sumber, lalu:
+      1. Menjalankan pass tambahan khusus keyword magang/internship di
+         sumber-sumber yang mendukung pencarian keyword, supaya total pool
+         cukup besar untuk menghasilkan ~100 lowongan gabungan (reguler +
+         magang) sekali jalan — bukan cuma ~20an seperti versi lama.
+      2. Klasifikasi ulang tipe_kerja (`pasca_proses`) supaya magang yang
+         "nyelip" di sumber tanpa keyword magang tetap terdeteksi dari teks.
+      3. Filter rentang tanggal posting (default 30 hari terakhir) supaya
+         tidak mengambil lowongan basi — lihat catatan di `_dalam_rentang_hari`
+         soal keterbatasan info tanggal tutup/deadline di sumber publik.
+      4. Dedup akhir lintas-sumber & lintas-pass.
+
+    `limits`: override limit per sumber untuk pass reguler, mis.
+    {"linkedin": 60, "remotive": 25}. Sumber yang tidak disebut memakai
+    `limit_per_sumber`.
     """
     limits = limits or {}
     semua_lowongan = []
 
-    def safe_extend(scraper_fn, *args, **kwargs):
+    def safe_extend(scraper_fn, label, *args, **kwargs):
         try:
             res = scraper_fn(*args, **kwargs)
             semua_lowongan.extend(res)
-            log.info("    → %d lowongan dari %s", len(res), scraper_fn.__name__)
+            log.info("    → %d lowongan dari %s", len(res), label)
         except Exception as e:
-            log.error("❌ Error di %s: %s", scraper_fn.__name__, e)
+            log.error("❌ Error di %s: %s", label, e)
 
-    # --- sumber lowongan Indonesia ---
-    safe_extend(scrape_karir_com, limit=limits.get("karir.com", limit_per_sumber))
+    # ---------- PASS 1: sumber lowongan Indonesia (reguler) ----------
+    safe_extend(scrape_karir_com, "karir.com", limit=limits.get("karir.com", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_glints, keyword="", limit=limits.get("glints", limit_per_sumber))
+    safe_extend(scrape_glints, "glints", keyword="", limit=limits.get("glints", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_jobstreet, keyword=keyword_linkedin, limit=limits.get("jobstreet", limit_per_sumber))
+    safe_extend(scrape_jobstreet, "jobstreet", keyword=keyword_linkedin, limit=limits.get("jobstreet", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_linkedin, keyword=keyword_linkedin, limit=limits.get("linkedin", max(limit_per_sumber, 25)))
+    safe_extend(scrape_linkedin, "linkedin", keyword=keyword_linkedin, limit=limits.get("linkedin", max(limit_per_sumber, 40)))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_kalibrr, limit=limits.get("kalibrr", limit_per_sumber))
+    safe_extend(scrape_kalibrr, "kalibrr", limit=limits.get("kalibrr", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_dealls, limit=limits.get("dealls", limit_per_sumber))
+    safe_extend(scrape_dealls, "dealls", limit=limits.get("dealls", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_talentics, limit=limits.get("talentics", limit_per_sumber))
+    safe_extend(scrape_talentics, "talentics", limit=limits.get("talentics", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    # --- sumber remote / internasional ---
-    safe_extend(scrape_remoteok, limit=limits.get("remoteok", limit_per_sumber))
+    # ---------- PASS 1: sumber remote / internasional (reguler) ----------
+    safe_extend(scrape_remoteok, "remoteok", limit=limits.get("remoteok", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_arbeitnow, limit=limits.get("arbeitnow", limit_per_sumber))
+    safe_extend(scrape_arbeitnow, "arbeitnow", limit=limits.get("arbeitnow", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_remotive, limit=limits.get("remotive", limit_per_sumber))
+    safe_extend(scrape_remotive, "remotive", limit=limits.get("remotive", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_jobicy, limit=limits.get("jobicy", limit_per_sumber))
+    safe_extend(scrape_jobicy, "jobicy", limit=limits.get("jobicy", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_himalayas, limit=limits.get("himalayas", limit_per_sumber))
+    safe_extend(scrape_himalayas, "himalayas", limit=limits.get("himalayas", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_weworkremotely, limit=limits.get("weworkremotely", limit_per_sumber))
+    safe_extend(scrape_weworkremotely, "weworkremotely", limit=limits.get("weworkremotely", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    # --- langsung dari careers page company (Greenhouse/Lever) ---
+    # ---------- langsung dari careers page company (Greenhouse/Lever) ----------
     if sertakan_ats and (GREENHOUSE_BOARD_TOKENS or LEVER_COMPANY_SLUGS):
-        safe_extend(scrape_semua_ats, limit_per_company=limits.get("ats_per_company", 20))
+        safe_extend(scrape_semua_ats, "greenhouse+lever", limit_per_company=limits.get("ats_per_company", 20))
 
-    sebelum = len(semua_lowongan)
-    semua_lowongan = dedup_lowongan(semua_lowongan)
-    if sebelum != len(semua_lowongan):
-        log.info("    → %d duplikat lintas-sumber dihapus", sebelum - len(semua_lowongan))
+    # ---------- PASS 2: keyword magang/internship khusus ----------
+    # Sumber yang tidak mendukung pencarian keyword (Karir.com, Kalibrr
+    # generik, Talentics) dilewati di sini — magang dari sana tetap
+    # tertangkap lewat deteksi teks di `pasca_proses`.
+    if sertakan_pass_magang:
+        log.info("  -- Pass tambahan: keyword magang/internship --")
 
-    return semua_lowongan
+        safe_extend(scrape_jobstreet, "jobstreet(magang)", keyword=keyword_magang, limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_linkedin, "linkedin(magang)", keyword="magang internship", limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_dealls, "dealls(magang)", daftar_path=DEALLS_SEARCH_PATHS_MAGANG, limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_remoteok, "remoteok(magang)", keyword="intern", limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_arbeitnow, "arbeitnow(magang)", keyword="intern", limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_remotive, "remotive(magang)", keyword="intern", limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_jobicy, "jobicy(magang)", keyword="internship", limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_himalayas, "himalayas(magang)", keyword="intern", limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+    log.info("  Total mentah sebelum pasca-proses: %d", len(semua_lowongan))
+    hasil_akhir = pasca_proses(semua_lowongan, hari_rentang=hari_rentang)
+    log.info("  Total setelah dedup + filter tanggal + klasifikasi ulang: %d", len(hasil_akhir))
+
+    return hasil_akhir
 
 
 if __name__ == "__main__":
-    data_gabungan = scrape_semua_sumber(limit_per_sumber=20)
+    data_gabungan = scrape_semua_sumber(limit_per_sumber=40, limit_magang_per_sumber=20)
+    reguler, magang = pisahkan_magang(data_gabungan)
 
-    print(f"\n✅ Total Ditemukan: {len(data_gabungan)} lowongan dari berbagai sumber:\n")
+    print(f"\n✅ Total Ditemukan: {len(data_gabungan)} lowongan ({len(reguler)} reguler, {len(magang)} magang)\n")
     for d in data_gabungan:
         print(f"[{d['sumber_platform'].upper()}] {d['judul']} @ {d['perusahaan']} ({d['lokasi']})")
         print(f"  Tipe Kerja : {d['tipe_kerja'].replace('_', ' ').title()}")
