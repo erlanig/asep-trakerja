@@ -61,11 +61,35 @@ stabil dijalankan dari server/cloud.
 7. LinkedIn sekarang paginasi (bukan cuma ~10 kartu di 1 halaman) dan
    punya limit independen dari `limit_per_sumber`, karena sebelumnya
    hasilnya selalu mentok di angka kecil walau limit dinaikkan.
+
+8. (Update ketiga) Dealls diperbaiki + sumber baru "ala Indeed":
+   - Dealls: URL situsnya sekarang pakai prefix `/en/` (mis.
+     `/en/loker/populer/...`), sementara regex & path lama masih pakai
+     `/loker/...` tanpa `/en/` — ini salah satu sebab hasil sedikit/kosong.
+     Selain itu, tiap halaman kategori Dealls SEKARANG hanya me-render ~2
+     lowongan lewat SSR (sisanya baru muncul lewat infinite-scroll JS di
+     browser asli) — jadi HTML statis memang secara struktural cuma bisa
+     dapat sedikit per URL. Diperbaiki dengan: (a) regex/base URL yang
+     benar, (b) fallback Playwright yang scroll halaman untuk memicu
+     infinite-scroll, (c) daftar path kategori yang jauh lebih banyak
+     (kombinasi peran x kota) supaya total volume tetap besar walau
+     per-halaman kecil.
+   - Indeed: TIDAK discrape langsung. Indeed memakai proteksi anti-bot
+     kelas berat (Cloudflare/DataDome + interstitial captcha) yang didesain
+     khusus menahan scraper headless, dan Term of Service mereka melarang
+     scraping otomatis — jadi scraper HTML/requests biasa akan sangat tidak
+     stabil (dan berisiko IP/akun kena blokir permanen). Sebagai gantinya
+     ditambahkan `scrape_jooble()`: Jooble adalah job aggregator yang
+     mengumpulkan lowongan dari ribuan sumber (termasuk banyak listing yang
+     juga muncul di Indeed) lewat REST API resmi & gratis (butuh API key,
+     daftar di https://jooble.org/api/about) — jauh lebih stabil daripada
+     scraping Indeed langsung dan mencakup Indonesia.
 """
 
 from __future__ import annotations
 
 import logging
+import os
 import random
 import re
 import time
@@ -252,12 +276,12 @@ def _dalam_rentang_hari(tanggal_iso: str | None, hari: int = HARI_RENTANG_DEFAUL
     Catatan soal tanggal tutup/deadline: sebagian besar sumber publik yang
     dipakai scraper ini (karir.com, Glints, JobStreet, Kalibrr, Dealls,
     LinkedIn guest API, RemoteOK, Arbeitnow, Remotive, Jobicy, Himalayas,
-    WWR, Greenhouse, Lever) TIDAK mengekspos tanggal tutup lowongan di
-    endpoint publik yang dipakai di sini — jadi filter "jangan yang tutup
-    hari ini / minimal H+1" tidak bisa dijamin dari sisi scraping. Sebagai
-    proxy yang realistis, kita pakai rentang tanggal POSTING (30 hari
-    terakhir) supaya tidak mengambil lowongan basi yang kemungkinan besar
-    sudah/hampir tutup. Kalau di masa depan sebuah sumber ternyata
+    WWR, Greenhouse, Lever, Jooble) TIDAK mengekspos tanggal tutup lowongan
+    di endpoint publik yang dipakai di sini — jadi filter "jangan yang
+    tutup hari ini / minimal H+1" tidak bisa dijamin dari sisi scraping.
+    Sebagai proxy yang realistis, kita pakai rentang tanggal POSTING (30
+    hari terakhir) supaya tidak mengambil lowongan basi yang kemungkinan
+    besar sudah/hampir tutup. Kalau di masa depan sebuah sumber ternyata
     menyediakan field deadline, tinggal tambahkan pengecekan
     `deadline >= besok` di sini.
     """
@@ -1203,10 +1227,18 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 20, max_pages: int
 
 
 # ==========================================
-# SCRAPER: DEALLS.COM (HTML) — ditambahkan warm-up + retry
+# SCRAPER: DEALLS.COM (HTML) — diperbaiki (prefix /en/, path lebih banyak,
+# fallback Playwright dengan scroll untuk memicu infinite-scroll)
 # ==========================================
 DEALLS_BASE = "https://dealls.com"
-DEALLS_JOB_LINK_RE = re.compile(r'^(/loker/([a-z0-9-]+)~([a-z0-9-]+))$')
+
+# PENTING: situs sekarang menyajikan halaman lewat prefix bahasa, mis.
+# `/en/loker/...` (dikonfirmasi dari HTML live: link kartu lowongan berupa
+# `/en/loker/{slug}~{company-slug}` atau `/en/loker/{slug}-{angka}~{company}`).
+# Regex lama (`^/loker/...$`, tanpa `/en/`) TIDAK PERNAH match link asli
+# sehingga hampir semua kartu lowongan gagal ter-parse -- ini penyebab
+# utama hasil Dealls sedikit/kosong.
+DEALLS_JOB_LINK_RE = re.compile(r'^(/(?:en/)?loker/([a-z0-9-]+)~([a-z0-9-]+))$')
 
 
 def _parse_gaji_dealls(text: str) -> str | None:
@@ -1219,25 +1251,87 @@ def _parse_gaji_dealls(text: str) -> str | None:
     return None
 
 
-# Satu path Dealls cuma memuat lowongan untuk 1 kategori pencarian, jadi
-# untuk dapat ≥20 hasil kita gabungkan beberapa path populer sekaligus
-# (bukan cuma "software engineer Jakarta" seperti versi lama).
+# CATATAN PENTING soal volume: tiap halaman kategori Dealls sekarang hanya
+# me-render sekitar 2 lowongan lewat server-side HTML (dikonfirmasi lewat
+# fetch langsung) -- sisanya baru dimuat lewat infinite-scroll JS di
+# browser. Artinya requests+BeautifulSoup biasa SECARA STRUKTURAL memang
+# cuma bisa dapat ~2 item per URL, berapa pun limit-nya. Untuk menutup itu:
+#   1. `_scrape_dealls_via_playwright()` di bawah scroll halaman beberapa
+#      kali supaya infinite-scroll ke-trigger dan lebih banyak kartu
+#      ter-render sebelum HTML diambil (dipakai otomatis kalau Playwright
+#      terpasang, sama seperti pola fallback Glints).
+#   2. Daftar path kategori diperluas jauh lebih banyak (kombinasi peran x
+#      kota) supaya total volume tetap besar walau per-halaman kecil, sama
+#      seperti fallback kalau Playwright tidak tersedia.
+DEALLS_PERAN = [
+    "software-engineer", "data-analyst", "marketing", "finance",
+    "admin", "sales", "customer-service", "human-resources",
+    "product-manager", "ui-ux-designer", "content-writer", "accounting",
+]
+DEALLS_KOTA = ["jakarta", "bandung", "surabaya", "yogyakarta", "semarang"]
+
 DEALLS_SEARCH_PATHS = [
-    "/loker/populer/loker-software-engineer-jakarta",
-    "/loker/populer/loker-marketing-jakarta",
-    "/loker/populer/loker-data-analyst-jakarta",
-    "/loker/populer/loker-finance-jakarta",
-    "/loker/populer/loker-admin-jakarta",
+    f"/en/loker/populer/loker-{peran}-{kota}"
+    for peran in DEALLS_PERAN
+    for kota in DEALLS_KOTA
 ]
 
 # Path khusus untuk kategori magang — mengikuti pola URL yang sama dengan
 # DEALLS_SEARCH_PATHS di atas. Verifikasi ulang slug ini kalau Dealls
 # mengubah struktur URL kategorinya.
 DEALLS_SEARCH_PATHS_MAGANG = [
-    "/loker/populer/loker-magang-jakarta",
-    "/loker/populer/loker-magang-bandung",
-    "/loker/populer/loker-internship-jakarta",
+    f"/en/loker/populer/loker-magang-{kota}" for kota in DEALLS_KOTA
+] + [
+    f"/en/loker/populer/loker-internship-{kota}" for kota in DEALLS_KOTA
 ]
+
+
+def _dealls_href_ke_path(href: str) -> str:
+    for base in (DEALLS_BASE, "https://www.dealls.com"):
+        if href.startswith(base):
+            return href[len(base):]
+    return href
+
+
+def _extract_dealls_card_info(a, path_only: str) -> dict | None:
+    m = DEALLS_JOB_LINK_RE.match(path_only)
+    if not m:
+        return None
+
+    slug_judul = m.group(2).replace("-", " ").title()
+    slug_perusahaan = m.group(3).replace("-", " ").title()
+    full_text = a.get_text(" ", strip=True)
+
+    tipe = "unknown"
+    lower_text = full_text.lower()
+    if "full-time" in lower_text or "penuh waktu" in lower_text:
+        tipe = "full-time"
+    elif "part-time" in lower_text or "paruh waktu" in lower_text:
+        tipe = "part-time"
+    elif "contract" in lower_text or "kontrak" in lower_text:
+        tipe = "kontrak"
+    elif "internship" in lower_text or "magang" in lower_text or "intern" in lower_text:
+        tipe = "magang"
+    elif "remote" in lower_text:
+        tipe = "remote"
+
+    lokasi_match = re.search(r'•\s*([A-Za-zÀ-ÿ .\'-]+?)(?:Min\.|Rp|Negotiable|$)', full_text)
+    lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
+
+    gaji = _parse_gaji_dealls(full_text)
+
+    return {
+        "judul": slug_judul,
+        "perusahaan": slug_perusahaan,
+        "lokasi": lokasi,
+        "tipe_kerja": tipe,
+        "kategori": None,
+        "deskripsi": "",
+        "gaji": gaji,
+        "sumber_platform": "dealls",
+        "sumber_url": f"{DEALLS_BASE}{path_only}",
+        "tanggal_post": date.today().isoformat(),
+    }
 
 
 def _scrape_dealls_satu_path(path: str, session, limit: int) -> list[dict]:
@@ -1255,52 +1349,66 @@ def _scrape_dealls_satu_path(path: str, session, limit: int) -> list[dict]:
     seen = set()
 
     for a in soup.find_all("a", href=True):
-        href = a["href"]
-        path_only = href
-        if href.startswith(DEALLS_BASE):
-            path_only = href[len(DEALLS_BASE):]
-
-        m = DEALLS_JOB_LINK_RE.match(path_only)
-        if not m:
-            continue
-
+        path_only = _dealls_href_ke_path(a["href"])
         if path_only in seen:
             continue
+        info = _extract_dealls_card_info(a, path_only)
+        if not info:
+            continue
         seen.add(path_only)
+        hasil.append(info)
+        if len(hasil) >= limit:
+            break
 
-        slug_judul = m.group(2).replace("-", " ").title()
-        slug_perusahaan = m.group(3).replace("-", " ").title()
+    return hasil
 
-        full_text = a.get_text(" ", strip=True)
 
-        tipe = "unknown"
-        if "Penuh waktu" in full_text:
-            tipe = "full-time"
-        elif "Paruh waktu" in full_text:
-            tipe = "part-time"
-        elif "Kontrak" in full_text:
-            tipe = "kontrak"
-        elif "Magang" in full_text:
-            tipe = "magang"
+def _scrape_dealls_via_playwright(path: str, limit: int, scroll_kali: int = 6) -> list[dict]:
+    """
+    Fallback untuk memicu infinite-scroll Dealls (SSR cuma render ~2 kartu).
+    Scroll halaman beberapa kali dengan jeda supaya request lazy-load
+    berikutnya sempat selesai sebelum HTML final diambil.
+    """
+    try:
+        from playwright.sync_api import sync_playwright
+    except ImportError:
+        log.info("  (Playwright tidak terpasang — Dealls tetap dibatasi HTML statis (~2 item/halaman). "
+                  "`pip install playwright && playwright install chromium` untuk hasil lebih banyak.)")
+        return []
 
-        lokasi_match = re.search(r'•\s*([A-Za-zÀ-ÿ .\'-]+?)(?:Min\.|Rp|Negotiable|$)', full_text)
-        lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
+    url = f"{DEALLS_BASE}{path}"
+    hasil = []
 
-        gaji = _parse_gaji_dealls(full_text)
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page(user_agent=(
+            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+        ))
+        try:
+            page.goto(url, timeout=30000)
+            page.wait_for_timeout(1500)
+            for _ in range(scroll_kali):
+                page.mouse.wheel(0, 2000)
+                page.wait_for_timeout(1200)
+            html = page.content()
+        except Exception as e:
+            log.error("❌ Playwright gagal render Dealls (%s): %s", path, e)
+            browser.close()
+            return hasil
+        browser.close()
 
-        hasil.append({
-            "judul": slug_judul,
-            "perusahaan": slug_perusahaan,
-            "lokasi": lokasi,
-            "tipe_kerja": tipe,
-            "kategori": None,
-            "deskripsi": "",
-            "gaji": gaji,
-            "sumber_platform": "dealls",
-            "sumber_url": f"{DEALLS_BASE}{path_only}",
-            "tanggal_post": date.today().isoformat(),
-        })
-
+    soup = BeautifulSoup(html, "html.parser")
+    seen = set()
+    for a in soup.find_all("a", href=True):
+        path_only = _dealls_href_ke_path(a["href"])
+        if path_only in seen:
+            continue
+        info = _extract_dealls_card_info(a, path_only)
+        if not info:
+            continue
+        seen.add(path_only)
+        hasil.append(info)
         if len(hasil) >= limit:
             break
 
@@ -1312,33 +1420,112 @@ def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[st
     `path`: kalau diisi manual, hanya fetch path itu (perilaku versi lama).
     `daftar_path`: override daftar path yang dipakai kalau `path` kosong
     (dipakai untuk fokus ke kategori magang lewat DEALLS_SEARCH_PATHS_MAGANG).
-    Kalau keduanya None (default), scraper jalan lewat beberapa kategori
-    populer sekaligus (DEALLS_SEARCH_PATHS) supaya bisa tembus `limit` yang
-    lebih tinggi tanpa mentok di 1-2 lowongan seperti sebelumnya.
+    Kalau keduanya None (default), scraper jalan lewat banyak kombinasi
+    peran x kota (DEALLS_SEARCH_PATHS) supaya bisa tembus `limit` yang
+    lebih tinggi -- perlu banyak path karena tiap halaman kategori cuma
+    ber-SSR ~2 lowongan (lihat catatan di atas DEALLS_SEARCH_PATHS).
+    Kalau Playwright terpasang, tiap path dicoba lewat scroll dulu supaya
+    hasil per-path juga lebih banyak dari ~2.
     """
     log.info("Mencari lowongan di Dealls...")
     impersonate = _random_impersonate()
-    session = _warm_up_session(DEALLS_BASE, impersonate)
+    session = _warm_up_session(f"{DEALLS_BASE}/en", impersonate)
 
-    if path:
-        hasil = _scrape_dealls_satu_path(path, session, limit)
-    else:
-        hasil = []
-        seen_url = set()
-        for p in (daftar_path or DEALLS_SEARCH_PATHS):
+    daftar_path_dipakai = [path] if path else (daftar_path or DEALLS_SEARCH_PATHS)
+
+    hasil = []
+    seen_url = set()
+    for p in daftar_path_dipakai:
+        if len(hasil) >= limit:
+            break
+
+        jobs_path = _scrape_dealls_via_playwright(p, limit) or _scrape_dealls_satu_path(p, session, limit)
+
+        for job in jobs_path:
+            if job["sumber_url"] in seen_url:
+                continue
+            seen_url.add(job["sumber_url"])
+            hasil.append(job)
             if len(hasil) >= limit:
                 break
-            for job in _scrape_dealls_satu_path(p, session, limit):
-                if job["sumber_url"] in seen_url:
-                    continue
-                seen_url.add(job["sumber_url"])
-                hasil.append(job)
-                if len(hasil) >= limit:
-                    break
-            time.sleep(random.uniform(0.6, 1.2))
+
+        time.sleep(random.uniform(0.5, 1.0))
 
     if not hasil:
-        log.warning("⚠️ 0 lowongan Dealls ditemukan. Path mungkin tidak valid.")
+        log.warning("⚠️ 0 lowongan Dealls ditemukan. Struktur/URL mungkin berubah lagi -- "
+                     "cek ulang pola link di DEALLS_JOB_LINK_RE.")
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER: JOOBLE (API JSON resmi, job aggregator lintas-sumber)
+# ==========================================
+# Dipakai sebagai pengganti "Indeed" yang diminta: Indeed sendiri TIDAK
+# discrape langsung karena proteksi anti-bot kelas berat (Cloudflare/
+# DataDome + captcha interstitial) dan ToS-nya melarang scraping otomatis,
+# jadi scraper requests/HTML biasa akan sangat tidak stabil dan berisiko
+# IP kena blokir permanen. Jooble adalah job aggregator resmi (mengumpulkan
+# listing dari ribuan situs, termasuk banyak yang juga tayang di Indeed)
+# dengan REST API gratis & resmi -- jauh lebih stabil untuk dijalankan
+# dari server/cloud.
+#
+# Cara dapat API key (gratis): daftar di https://jooble.org/api/about,
+# lalu set sebagai environment variable:
+#   export JOOBLE_API_KEY="xxxxxxxx-xxxx-xxxx-xxxx-xxxxxxxxxxxx"
+JOOBLE_API_KEY = os.getenv("JOOBLE_API_KEY", "")
+JOOBLE_API_URL = "https://jooble.org/api/{api_key}"
+
+
+def scrape_jooble(keyword: str = "software engineer", location: str = "Indonesia", limit: int = 20, page: int = 1) -> list[dict]:
+    log.info("Mencari lowongan di Jooble...")
+    hasil = []
+
+    if not JOOBLE_API_KEY:
+        log.info("  (JOOBLE_API_KEY belum diset -- lewati sumber ini. "
+                  "Daftar gratis di https://jooble.org/api/about lalu set env var JOOBLE_API_KEY.)")
+        return hasil
+
+    url = JOOBLE_API_URL.format(api_key=JOOBLE_API_KEY)
+    body = {"keywords": keyword, "location": location, "page": str(page)}
+
+    try:
+        resp = requests.post(url, json=body, headers={"Content-Type": "application/json"}, timeout=15, impersonate="chrome124")
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("❌ Gagal fetch Jooble: %s", e)
+        return hasil
+
+    for job in data.get("jobs", [])[:limit]:
+        judul = job.get("title")
+        if not judul:
+            continue
+
+        tipe_raw = (job.get("type") or "").lower()
+        if "full" in tipe_raw:
+            tipe = "full-time"
+        elif "part" in tipe_raw:
+            tipe = "part-time"
+        elif "contract" in tipe_raw or "kontrak" in tipe_raw:
+            tipe = "kontrak"
+        elif "intern" in tipe_raw or "magang" in tipe_raw:
+            tipe = "magang"
+        else:
+            tipe = "unknown"
+
+        hasil.append({
+            "judul": judul,
+            "perusahaan": job.get("company") or "Tidak diketahui",
+            "lokasi": job.get("location") or location,
+            "tipe_kerja": tipe,
+            "kategori": None,
+            "deskripsi": re.sub("<[^<]+?>", "", job.get("snippet") or "")[:1000],
+            "gaji": job.get("salary") or None,
+            "sumber_platform": "jooble",
+            "sumber_url": job.get("link"),
+            "tanggal_post": _parse_iso_date(job.get("updated")),
+        })
 
     return hasil
 
@@ -1538,9 +1725,9 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
 # ==========================================
 # Kata kunci dipakai untuk pass kedua khusus magang di sumber-sumber yang
 # mendukung pencarian keyword (JobStreet, LinkedIn, RemoteOK, Arbeitnow,
-# Remotive, Jobicy, Himalayas). Ini penting karena keyword utama biasanya
-# "software engineer" dkk yang jarang menangkap lowongan magang — tanpa
-# pass kedua ini, magang cuma kebagian sisa dari deteksi teks pasif.
+# Remotive, Jobicy, Himalayas, Jooble). Ini penting karena keyword utama
+# biasanya "software engineer" dkk yang jarang menangkap lowongan magang —
+# tanpa pass kedua ini, magang cuma kebagian sisa dari deteksi teks pasif.
 KEYWORD_MAGANG_DEFAULT = "magang internship"
 
 
@@ -1604,6 +1791,9 @@ def scrape_semua_sumber(
     safe_extend(scrape_talentics, "talentics", limit=limits.get("talentics", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
+    safe_extend(scrape_jooble, "jooble", keyword=keyword_linkedin, location="Indonesia", limit=limits.get("jooble", limit_per_sumber))
+    time.sleep(random.uniform(0.8, 1.5))
+
     # ---------- PASS 1: sumber remote / internasional (reguler) ----------
     safe_extend(scrape_remoteok, "remoteok", limit=limits.get("remoteok", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
@@ -1641,6 +1831,9 @@ def scrape_semua_sumber(
         time.sleep(random.uniform(0.8, 1.5))
 
         safe_extend(scrape_dealls, "dealls(magang)", daftar_path=DEALLS_SEARCH_PATHS_MAGANG, limit=limit_magang_per_sumber)
+        time.sleep(random.uniform(0.8, 1.5))
+
+        safe_extend(scrape_jooble, "jooble(magang)", keyword=keyword_magang, location="Indonesia", limit=limit_magang_per_sumber)
         time.sleep(random.uniform(0.8, 1.5))
 
         safe_extend(scrape_remoteok, "remoteok(magang)", keyword="intern", limit=limit_magang_per_sumber)
