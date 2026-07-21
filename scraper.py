@@ -1251,38 +1251,32 @@ def _parse_gaji_dealls(text: str) -> str | None:
     return None
 
 
-# CATATAN PENTING soal volume: tiap halaman kategori Dealls sekarang hanya
-# me-render sekitar 2 lowongan lewat server-side HTML (dikonfirmasi lewat
-# fetch langsung) -- sisanya baru dimuat lewat infinite-scroll JS di
-# browser. Artinya requests+BeautifulSoup biasa SECARA STRUKTURAL memang
-# cuma bisa dapat ~2 item per URL, berapa pun limit-nya. Untuk menutup itu:
-#   1. `_scrape_dealls_via_playwright()` di bawah scroll halaman beberapa
-#      kali supaya infinite-scroll ke-trigger dan lebih banyak kartu
-#      ter-render sebelum HTML diambil (dipakai otomatis kalau Playwright
-#      terpasang, sama seperti pola fallback Glints).
-#   2. Daftar path kategori diperluas jauh lebih banyak (kombinasi peran x
-#      kota) supaya total volume tetap besar walau per-halaman kecil, sama
-#      seperti fallback kalau Playwright tidak tersedia.
-DEALLS_PERAN = [
-    "software-engineer", "data-analyst", "marketing", "finance",
-    "admin", "sales", "customer-service", "human-resources",
-    "product-manager", "ui-ux-designer", "content-writer", "accounting",
-]
-DEALLS_KOTA = ["jakarta", "bandung", "surabaya", "yogyakarta", "semarang"]
-
+# CATATAN soal volume (dikonfirmasi lewat fetch langsung ke situsnya):
+# - Halaman kategori SEMPIT (mis. `/en/loker/populer/loker-software-
+#   engineer-jakarta`, kombinasi peran+kota) cuma me-render ~2 lowongan
+#   lewat SSR. Versi sebelumnya coba menutup ini dengan 60 kombinasi
+#   peran x kota -- tapi itu salah arah dan bikin lambat (banyak request,
+#   dan sebagian besar butuh fallback Playwright).
+# - Halaman kategori LUAS seperti `/en/loker` ("All Jobs") atau
+#   `/en/loker/populer` ("Trending Jobs") ternyata me-render ~15-17
+#   lowongan sekaligus lewat SSR -- jauh lebih efisien per request.
+# - `?page=2` dst TIDAK mengubah hasil (server mengabaikan query itu untuk
+#   SSR) -- jadi tidak ada cara pagination murah; lowongan tambahan di
+#   luar batch pertama cuma bisa didapat lewat infinite-scroll JS asli
+#   (di-handle fallback Playwright kalau terpasang).
+# Jadi sekarang scraper cukup memukul beberapa halaman LUAS (bukan puluhan
+# kombinasi sempit) -- jauh lebih cepat dengan hasil yang sama/lebih baik.
 DEALLS_SEARCH_PATHS = [
-    f"/en/loker/populer/loker-{peran}-{kota}"
-    for peran in DEALLS_PERAN
-    for kota in DEALLS_KOTA
+    "/en/loker",
+    "/en/loker/populer",
+    "/en/loker/tipe/loker-full-time",
+    "/en/loker/tipe/loker-kontrak",
+    "/en/loker/tipe/loker-part-time",
+    "/en/loker/tipe/loker-freelance",
 ]
 
-# Path khusus untuk kategori magang — mengikuti pola URL yang sama dengan
-# DEALLS_SEARCH_PATHS di atas. Verifikasi ulang slug ini kalau Dealls
-# mengubah struktur URL kategorinya.
 DEALLS_SEARCH_PATHS_MAGANG = [
-    f"/en/loker/populer/loker-magang-{kota}" for kota in DEALLS_KOTA
-] + [
-    f"/en/loker/populer/loker-internship-{kota}" for kota in DEALLS_KOTA
+    "/en/loker/tipe/loker-magang",
 ]
 
 
@@ -1363,40 +1357,28 @@ def _scrape_dealls_satu_path(path: str, session, limit: int) -> list[dict]:
     return hasil
 
 
-def _scrape_dealls_via_playwright(path: str, limit: int, scroll_kali: int = 6) -> list[dict]:
+def _scrape_dealls_via_playwright_page(page, path: str, limit: int, scroll_kali: int = 4) -> list[dict]:
     """
-    Fallback untuk memicu infinite-scroll Dealls (SSR cuma render ~2 kartu).
-    Scroll halaman beberapa kali dengan jeda supaya request lazy-load
-    berikutnya sempat selesai sebelum HTML final diambil.
+    Ambil satu path pakai *page* Playwright yang sudah ada (browser dibuka
+    sekali di scrape_dealls(), dipakai ulang untuk semua path). Ini yang
+    membuat versi sebelumnya lambat: browser dibuka-tutup untuk SETIAP path
+    (~1-2 detik overhead x puluhan path), sekarang cuma dibuka sekali.
+    Scroll juga dikurangi jadi 4x @ 800ms (dari 6x @ 1200ms) -- cukup untuk
+    memicu beberapa batch infinite-scroll tanpa bikin tiap path jadi ~9-10
+    detik sendiri.
     """
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        log.info("  (Playwright tidak terpasang — Dealls tetap dibatasi HTML statis (~2 item/halaman). "
-                  "`pip install playwright && playwright install chromium` untuk hasil lebih banyak.)")
-        return []
-
     url = f"{DEALLS_BASE}{path}"
     hasil = []
-
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ))
-        try:
-            page.goto(url, timeout=30000)
-            page.wait_for_timeout(1500)
-            for _ in range(scroll_kali):
-                page.mouse.wheel(0, 2000)
-                page.wait_for_timeout(1200)
-            html = page.content()
-        except Exception as e:
-            log.error("❌ Playwright gagal render Dealls (%s): %s", path, e)
-            browser.close()
-            return hasil
-        browser.close()
+    try:
+        page.goto(url, timeout=20000)
+        page.wait_for_timeout(1000)
+        for _ in range(scroll_kali):
+            page.mouse.wheel(0, 2500)
+            page.wait_for_timeout(800)
+        html = page.content()
+    except Exception as e:
+        log.error("❌ Playwright gagal render Dealls (%s): %s", path, e)
+        return hasil
 
     soup = BeautifulSoup(html, "html.parser")
     seen = set()
@@ -1415,7 +1397,8 @@ def _scrape_dealls_via_playwright(path: str, limit: int, scroll_kali: int = 6) -
     return hasil
 
 
-def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[str] | None = None) -> list[dict]:
+def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[str] | None = None,
+                   min_item_sebelum_playwright: int = 4) -> list[dict]:
     """
     `path`: kalau diisi manual, hanya fetch path itu (perilaku versi lama).
     `daftar_path`: override daftar path yang dipakai kalau `path` kosong
@@ -1424,8 +1407,12 @@ def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[st
     peran x kota (DEALLS_SEARCH_PATHS) supaya bisa tembus `limit` yang
     lebih tinggi -- perlu banyak path karena tiap halaman kategori cuma
     ber-SSR ~2 lowongan (lihat catatan di atas DEALLS_SEARCH_PATHS).
-    Kalau Playwright terpasang, tiap path dicoba lewat scroll dulu supaya
-    hasil per-path juga lebih banyak dari ~2.
+
+    Strategi kecepatan: HTML statis (cepat, ~1 request) dicoba DULU untuk
+    tiap path. Playwright (mahal, perlu browser) HANYA dipanggil untuk path
+    yang hasil statisnya kurang dari `min_item_sebelum_playwright` -- dan
+    browser dibuka SEKALI untuk seluruh pemanggilan ini (bukan per-path),
+    supaya tidak lambat seperti versi sebelumnya.
     """
     log.info("Mencari lowongan di Dealls...")
     impersonate = _random_impersonate()
@@ -1435,21 +1422,52 @@ def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[st
 
     hasil = []
     seen_url = set()
+    path_kurang_hasil = []  # dikumpulkan dulu, baru diproses lewat Playwright sekali jalan
+
+    # --- tahap 1: HTML statis untuk semua path (cepat) ---
     for p in daftar_path_dipakai:
         if len(hasil) >= limit:
             break
 
-        jobs_path = _scrape_dealls_via_playwright(p, limit) or _scrape_dealls_satu_path(p, session, limit)
-
+        jobs_path = _scrape_dealls_satu_path(p, session, limit)
         for job in jobs_path:
             if job["sumber_url"] in seen_url:
                 continue
             seen_url.add(job["sumber_url"])
             hasil.append(job)
-            if len(hasil) >= limit:
-                break
 
-        time.sleep(random.uniform(0.5, 1.0))
+        if len(jobs_path) < min_item_sebelum_playwright:
+            path_kurang_hasil.append(p)
+
+        time.sleep(random.uniform(0.3, 0.6))
+
+    # --- tahap 2: Playwright (1 browser dipakai ulang) hanya untuk path yang kurang ---
+    if len(hasil) < limit and path_kurang_hasil:
+        try:
+            from playwright.sync_api import sync_playwright
+        except ImportError:
+            log.info("  (Playwright tidak terpasang -- Dealls dibatasi hasil HTML statis saja. "
+                      "`pip install playwright && playwright install chromium` untuk hasil lebih banyak.)")
+            path_kurang_hasil = []
+
+        if path_kurang_hasil:
+            with sync_playwright() as pw:
+                browser = pw.chromium.launch(headless=True)
+                page = browser.new_page(user_agent=(
+                    "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
+                    "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
+                ))
+                for p in path_kurang_hasil:
+                    if len(hasil) >= limit:
+                        break
+                    for job in _scrape_dealls_via_playwright_page(page, p, limit):
+                        if job["sumber_url"] in seen_url:
+                            continue
+                        seen_url.add(job["sumber_url"])
+                        hasil.append(job)
+                        if len(hasil) >= limit:
+                            break
+                browser.close()
 
     if not hasil:
         log.warning("⚠️ 0 lowongan Dealls ditemukan. Struktur/URL mungkin berubah lagi -- "
