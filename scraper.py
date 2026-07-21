@@ -1,19 +1,21 @@
 import time
-import requests
 from datetime import datetime, date
+
+# 1. GANTI IMPORT REQUESTS
+# Hapus: import requests
+# Gunakan curl_cffi:
+from curl_cffi import requests
 
 # ==========================================
 # FUNGSI BANTUAN UMUM
 # ==========================================
 def _parse_iso_date(iso_string: str) -> str:
-    """Mengubah format waktu ISO menjadi string tanggal YYYY-MM-DD"""
     if not iso_string:
         return date.today().isoformat()
     try:
         return datetime.fromisoformat(iso_string.replace("Z", "+00:00")).date().isoformat()
     except ValueError:
         return date.today().isoformat()
-
 
 # ==========================================
 # SCRAPER: KARIR.COM
@@ -26,7 +28,6 @@ KARIR_HEADERS = {
     "Content-Type": "application/json",
     "Origin": "https://karir.com",
     "Referer": "https://karir.com/",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
 }
 
 def _format_gaji_karir(item: dict) -> str | None:
@@ -40,7 +41,8 @@ def get_job_detail_karir(opportunity_id: int) -> str:
     url = f"{KARIR_BASE_API}/v1/opportunity/detail"
     body = {"opportunity_id": opportunity_id, "language": "id"}
     try:
-        resp = requests.post(url, headers=KARIR_HEADERS, json=body, timeout=10)
+        # 2. TAMBAHKAN IMPERSONATE DI SINI
+        resp = requests.post(url, headers=KARIR_HEADERS, json=body, timeout=10, impersonate="chrome110")
         resp.raise_for_status()
         data = resp.json().get("data", {})
         return data.get("job_description") or data.get("description") or ""
@@ -61,7 +63,8 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
     }
 
     try:
-        resp = requests.post(url, headers=KARIR_HEADERS, json=body, timeout=15)
+        # 3. TAMBAHKAN IMPERSONATE DI SINI
+        resp = requests.post(url, headers=KARIR_HEADERS, json=body, timeout=15, impersonate="chrome110")
         resp.raise_for_status()
         payload = resp.json()
     except Exception as e:
@@ -77,7 +80,6 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
             continue
 
         perusahaan = item.get("company_name")
-        # Opsional: Ambil detail deskripsi. Beri jeda agar tidak di-banned
         deskripsi_lengkap = get_job_detail_karir(job_id)
         time.sleep(0.5) 
 
@@ -102,22 +104,13 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 # ==========================================
 GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
 
+# Header lebih bersih karena curl_cffi otomatis mengurus fingerprint browser
 GLINTS_HEADERS = {
     "Accept": "*/*",
-    "Accept-Language": "id",
     "Content-Type": "application/json",
     "Origin": "https://glints.com",
-    "Referer": "https://glints.com/id/opportunities/jobs/explore?country=ID&locationName=All%20Cities%2FProvinces",
-    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-    "x-glints-country-code": "ID",
-    "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
-    "sec-ch-ua-mobile": "?0",
-    "sec-ch-ua-platform": '"Windows"',
-    "sec-fetch-dest": "empty",
-    "sec-fetch-mode": "cors",
-    "sec-fetch-site": "same-origin",
-    # INI BAGIAN PALING PENTING (Salinan dari -b atau Cookie di curl Anda)
-    "Cookie": 'device_id=c51f7472-77c9-4ab9-9054-db56dceb1afb; glints_tracking_id=043e7f36-ff63-4dee-a6aa-98617331d53a; _gcl_au=1.1.908327477.1784602947; sessionFirstTouchPath=/id/opportunities/jobs/explore; sessionLastTouchPath=/id/opportunities/jobs/explore; currentJobID=064d973c-5732-4643-b903-ef65ae3c6d8b; sessionIsLastTouch=false;'
+    "Referer": "https://glints.com/id/opportunities/jobs/explore",
+    "x-glints-country-code": "ID", 
 }
 
 GRAPHQL_QUERY = """
@@ -174,7 +167,8 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
     }
 
     try:
-        resp = requests.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15)
+        # 4. TAMBAHKAN IMPERSONATE DI SINI UNTUK GLINTS
+        resp = requests.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15, impersonate="chrome110")
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -198,7 +192,7 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
             "lokasi": lokasi,
             "tipe_kerja": item.get("type", "").lower(),
             "kategori": None,
-            "deskripsi": "", # Glints list endpoint tidak memuat deskripsi lengkap
+            "deskripsi": "", 
             "gaji": _format_gaji_glints(item.get("salaries", [])),
             "sumber_platform": "glints",
             "sumber_url": f"https://glints.com/id/opportunities/jobs/{job_id}",
@@ -212,20 +206,13 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
 # AGGREGATOR UTAMA
 # ==========================================
 def scrape_semua_sumber(limit_per_sumber: int = 5) -> list[dict]:
-    """
-    Panggil semua fetcher sumber yang aktif, gabungkan hasilnya.
-    """
     semua_lowongan = []
-
-    # 1. Ambil dari Karir.com
+    
     data_karir = scrape_karir_com(limit=limit_per_sumber)
     semua_lowongan.extend(data_karir)
     
-    # Jeda antar request platform
     time.sleep(1)
 
-    # 2. Ambil dari Glints
-    # Di glints kita pakai `page_size` yang fungsinya mirip dengan `limit`
     data_glints = scrape_glints(page_size=limit_per_sumber)
     semua_lowongan.extend(data_glints)
 
@@ -233,7 +220,6 @@ def scrape_semua_sumber(limit_per_sumber: int = 5) -> list[dict]:
 
 
 if __name__ == "__main__":
-    # Jalankan aggregator (Ambil 5 dari karir, 5 dari glints)
     data_gabungan = scrape_semua_sumber(limit_per_sumber=5)
     
     print(f"\n✅ Total Ditemukan: {len(data_gabungan)} lowongan dari berbagai sumber:\n")
