@@ -999,90 +999,108 @@ def _parse_gaji_kalibrr(text: str) -> str | None:
     return None
 
 
-def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
+def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 20, max_pages: int = 4) -> list[dict]:
+    """
+    Satu halaman Kalibrr biasanya cuma memuat belasan lowongan, makanya versi
+    lama sering mentok di bawah 20 walau `limit` dinaikkan. Sekarang loop
+    lewat `?page=N` sampai `limit` terpenuhi atau halaman berikutnya kosong.
+    """
     log.info("Mencari lowongan di Kalibrr...")
     hasil = []
     impersonate = _random_impersonate()
     session = _warm_up_session(KALIBRR_BASE, impersonate)
-    url = f"{KALIBRR_BASE}{path}"
-
-    try:
-        resp = _request_with_retry(session, "GET", url)
-        resp.raise_for_status()
-    except Exception as e:
-        log.error("❌ Gagal fetch Kalibrr: %s", e)
-        return hasil
-
-    soup = BeautifulSoup(resp.text, "html.parser")
     seen_ids = set()
 
-    for a in soup.find_all("a", href=True):
-        href = a["href"]
-        path_only = href
-        for base in ("https://www.kalibrr.id", "https://www.kalibrr.com"):
-            if href.startswith(base):
-                path_only = href[len(base):]
-                break
-
-        m = KALIBRR_JOB_LINK_RE.match(path_only)
-        if not m:
-            continue
-
-        job_id = m.group(2)
-        if job_id in seen_ids:
-            continue
-
-        judul = a.get_text(strip=True)
-        if not judul:
-            continue
-        seen_ids.add(job_id)
-
-        perusahaan = "Tidak diketahui"
-        next_a = a.find_next("a", href=True)
-        if next_a:
-            teks = next_a.get_text(strip=True)
-            if teks:
-                perusahaan = teks
-
-        container = a
-        card_text = ""
-        for _ in range(6):
-            container = container.find_parent()
-            if container is None:
-                break
-            card_text = container.get_text(" ", strip=True)
-            if len(card_text) > 100:
-                break
-
-        lokasi_match = re.search(r'([A-Za-zÀ-ÿ .\'-]+,\s*Indonesia)', card_text)
-        lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
-
-        gaji = _parse_gaji_kalibrr(card_text)
-
-        if "FULL_TIME" in card_text:
-            tipe = "full-time"
-        elif "PART_TIME" in card_text:
-            tipe = "part-time"
-        elif "CONTRACTOR" in card_text:
-            tipe = "kontrak"
-        else:
-            tipe = "unknown"
-
-        hasil.append({
-            "judul": judul,
-            "perusahaan": perusahaan,
-            "lokasi": lokasi,
-            "tipe_kerja": tipe,
-            "kategori": None,
-            "deskripsi": "",
-            "gaji": gaji,
-            "sumber_platform": "kalibrr",
-            "sumber_url": f"{KALIBRR_BASE}{m.group(1)}",
-            "tanggal_post": date.today().isoformat(),
-        })
-
+    for page in range(1, max_pages + 1):
         if len(hasil) >= limit:
             break
+
+        sep = "&" if "?" in path else "?"
+        url = f"{KALIBRR_BASE}{path}{sep}page={page}" if page > 1 else f"{KALIBRR_BASE}{path}"
+
+        try:
+            resp = _request_with_retry(session, "GET", url)
+            resp.raise_for_status()
+        except Exception as e:
+            log.error("❌ Gagal fetch Kalibrr (halaman %d): %s", page, e)
+            break
+
+        soup = BeautifulSoup(resp.text, "html.parser")
+        ditemukan_di_halaman_ini = 0
+
+        for a in soup.find_all("a", href=True):
+            href = a["href"]
+            path_only = href
+            for base in ("https://www.kalibrr.id", "https://www.kalibrr.com"):
+                if href.startswith(base):
+                    path_only = href[len(base):]
+                    break
+
+            m = KALIBRR_JOB_LINK_RE.match(path_only)
+            if not m:
+                continue
+
+            job_id = m.group(2)
+            if job_id in seen_ids:
+                continue
+
+            judul = a.get_text(strip=True)
+            if not judul:
+                continue
+            seen_ids.add(job_id)
+            ditemukan_di_halaman_ini += 1
+
+            perusahaan = "Tidak diketahui"
+            next_a = a.find_next("a", href=True)
+            if next_a:
+                teks = next_a.get_text(strip=True)
+                if teks:
+                    perusahaan = teks
+
+            container = a
+            card_text = ""
+            for _ in range(6):
+                container = container.find_parent()
+                if container is None:
+                    break
+                card_text = container.get_text(" ", strip=True)
+                if len(card_text) > 100:
+                    break
+
+            lokasi_match = re.search(r'([A-Za-zÀ-ÿ .\'-]+,\s*Indonesia)', card_text)
+            lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
+
+            gaji = _parse_gaji_kalibrr(card_text)
+
+            if "FULL_TIME" in card_text:
+                tipe = "full-time"
+            elif "PART_TIME" in card_text:
+                tipe = "part-time"
+            elif "CONTRACTOR" in card_text:
+                tipe = "kontrak"
+            else:
+                tipe = "unknown"
+
+            hasil.append({
+                "judul": judul,
+                "perusahaan": perusahaan,
+                "lokasi": lokasi,
+                "tipe_kerja": tipe,
+                "kategori": None,
+                "deskripsi": "",
+                "gaji": gaji,
+                "sumber_platform": "kalibrr",
+                "sumber_url": f"{KALIBRR_BASE}{m.group(1)}",
+                "tanggal_post": date.today().isoformat(),
+            })
+
+            if len(hasil) >= limit:
+                break
+
+        if ditemukan_di_halaman_ini == 0:
+            break  # halaman berikutnya kosong, tidak ada gunanya lanjut
+
+        time.sleep(random.uniform(0.6, 1.2))
 
     if not hasil:
         log.warning("⚠️ 0 lowongan Kalibrr ditemukan. Struktur mungkin berubah.")
@@ -1107,18 +1125,27 @@ def _parse_gaji_dealls(text: str) -> str | None:
     return None
 
 
-def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", limit: int = 10) -> list[dict]:
-    log.info("Mencari lowongan di Dealls...")
+# Satu path Dealls cuma memuat lowongan untuk 1 kategori pencarian, jadi
+# untuk dapat ≥20 hasil kita gabungkan beberapa path populer sekaligus
+# (bukan cuma "software engineer Jakarta" seperti versi lama).
+DEALLS_SEARCH_PATHS = [
+    "/loker/populer/loker-software-engineer-jakarta",
+    "/loker/populer/loker-marketing-jakarta",
+    "/loker/populer/loker-data-analyst-jakarta",
+    "/loker/populer/loker-finance-jakarta",
+    "/loker/populer/loker-admin-jakarta",
+]
+
+
+def _scrape_dealls_satu_path(path: str, session, limit: int) -> list[dict]:
     hasil = []
-    impersonate = _random_impersonate()
-    session = _warm_up_session(DEALLS_BASE, impersonate)
     url = f"{DEALLS_BASE}{path}"
 
     try:
         resp = _request_with_retry(session, "GET", url)
         resp.raise_for_status()
     except Exception as e:
-        log.error("❌ Gagal fetch Dealls: %s", e)
+        log.error("❌ Gagal fetch Dealls (%s): %s", path, e)
         return hasil
 
     soup = BeautifulSoup(resp.text, "html.parser")
@@ -1173,6 +1200,37 @@ def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", 
 
         if len(hasil) >= limit:
             break
+
+    return hasil
+
+
+def scrape_dealls(path: str | None = None, limit: int = 20) -> list[dict]:
+    """
+    `path`: kalau diisi manual, hanya fetch path itu (perilaku versi lama).
+    Kalau None (default), scraper jalan lewat beberapa kategori populer
+    sekaligus (DEALLS_SEARCH_PATHS) supaya bisa tembus `limit` yang lebih
+    tinggi tanpa mentok di 1-2 lowongan seperti sebelumnya.
+    """
+    log.info("Mencari lowongan di Dealls...")
+    impersonate = _random_impersonate()
+    session = _warm_up_session(DEALLS_BASE, impersonate)
+
+    if path:
+        hasil = _scrape_dealls_satu_path(path, session, limit)
+    else:
+        hasil = []
+        seen_url = set()
+        for p in DEALLS_SEARCH_PATHS:
+            if len(hasil) >= limit:
+                break
+            for job in _scrape_dealls_satu_path(p, session, limit):
+                if job["sumber_url"] in seen_url:
+                    continue
+                seen_url.add(job["sumber_url"])
+                hasil.append(job)
+                if len(hasil) >= limit:
+                    break
+            time.sleep(random.uniform(0.6, 1.2))
 
     if not hasil:
         log.warning("⚠️ 0 lowongan Dealls ditemukan. Path mungkin tidak valid.")
@@ -1321,12 +1379,20 @@ def scrape_talentics_direct(url: str, limit: int = 10) -> list[dict]:
         return []
 
 
-def scrape_talentics(limit: int = 10) -> list[dict]:
+def scrape_talentics(limit: int = 20) -> list[dict]:
+    """
+    NB: Talentics di sini adalah halaman karir SATU perusahaan (bukan job
+    board multi-perusahaan seperti sumber lain), jadi hasilnya dibatasi oleh
+    berapa banyak posisi yang sedang benar-benar dibuka perusahaan tsb —
+    menaikkan `limit` tidak akan memaksa jadi 20 kalau lowongan bukanya
+    memang cuma segelintir. Kalau maksudmu "Talentics" itu nama job board
+    lain yang beda, kasih tahu URL-nya dan saya sesuaikan.
+    """
     log.info("Mencari lowongan Talentics...")
     for url in TALENTICS_CAREER_URLS:
         hasil = scrape_talentics_direct(url, limit)
         if hasil:
-            log.info("  Berhasil dari %s", url)
+            log.info("  Berhasil dari %s (%d lowongan tersedia di halaman karir ini)", url, len(hasil))
             return hasil
     log.info("  Tidak ditemukan halaman karir langsung. Fallback ke LinkedIn...")
     linkedin_jobs = scrape_linkedin(keyword="Talentics", location="Indonesia", limit=limit * 2)
@@ -1366,7 +1432,7 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
 # AGGREGATOR UTAMA
 # ==========================================
 def scrape_semua_sumber(
-    limit_per_sumber: int = 5,
+    limit_per_sumber: int = 20,
     keyword_linkedin: str = "software engineer",
     limits: dict | None = None,
     sertakan_ats: bool = True,
@@ -1443,7 +1509,7 @@ def scrape_semua_sumber(
 
 
 if __name__ == "__main__":
-    data_gabungan = scrape_semua_sumber(limit_per_sumber=5)
+    data_gabungan = scrape_semua_sumber(limit_per_sumber=20)
 
     print(f"\n✅ Total Ditemukan: {len(data_gabungan)} lowongan dari berbagai sumber:\n")
     for d in data_gabungan:
