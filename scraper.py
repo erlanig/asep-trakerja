@@ -233,32 +233,18 @@ SITE_CONFIGS = {
         ),
         "impersonate": "chrome120",
         "needs_browser": False,
-        "selector_job_card": "li",
+        "selector_job_card": "div.base-card",
         "selector_title": "h3.base-search-card__title",
         "selector_company": "h4.base-search-card__subtitle",
         "selector_location": "span.job-search-card__location",
         "selector_link": "a.base-card__full-link",
         "link_prefix": "",
     },
-    # Kalibrr ditangani oleh scrape_kalibrr() khusus di bawah (bukan generic_html_scraper),
-    # karena dia butuh regex pola URL, bukan CSS selector biasa. Lihat penjelasan di sana.
 }
 
 # ==========================================
 # SCRAPER: KALIBRR.ID (HTML, pola URL job — bukan CSS class)
 # ==========================================
-# PENTING: pakai domain kalibrr.id (bukan kalibrr.com) supaya hasilnya
-# lowongan Indonesia, bukan Filipina. kalibrr.com melayani PH+ID+US campur,
-# sedangkan kalibrr.id adalah versi khusus Indonesia.
-#
-# Halamannya SSR (Next.js) — data lowongan sudah ada di HTML pertama kali
-# di-load, jadi TIDAK perlu Playwright, cukup requests + BeautifulSoup biasa.
-#
-# Strategi ekstraksi: alih-alih menebak nama class CSS (yang sering berubah
-# dan saya tidak bisa verifikasi langsung), saya pakai pola URL lowongan yang
-# stabil: /c/{slug-perusahaan}/jobs/{id-angka}/{slug-judul} (tanpa query string).
-# Ini jauh lebih tahan terhadap perubahan desain dibanding CSS class.
-
 KALIBRR_BASE = "https://www.kalibrr.id"
 KALIBRR_JOB_LINK_RE = re.compile(r'^(/c/[^/]+/jobs/(\d+)/[^?]+)$')
 
@@ -299,8 +285,7 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
             continue
         seen_ids.add(job_id)
 
-        # Nama perusahaan: anchor berikutnya setelah link judul biasanya link
-        # nama perusahaan (bukan logo, yang teksnya sering kosong karena cuma <img>).
+        # Nama perusahaan: anchor berikutnya setelah link judul biasanya link nama perusahaan
         perusahaan = "Tidak diketahui"
         next_a = a.find_next("a", href=True)
         if next_a:
@@ -357,6 +342,89 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
     return hasil
 
 
+# ==========================================
+# SCRAPER: DEALLS.COM (HTML, pola URL job)
+# ==========================================
+DEALLS_BASE = "https://dealls.com"
+DEALLS_JOB_LINK_RE = re.compile(r'^(/loker/([a-z0-9-]+)~([a-z0-9-]+))$')
+
+
+def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", limit: int = 10) -> list[dict]:
+    print("Mencari lowongan di Dealls...")
+    hasil = []
+    url = f"{DEALLS_BASE}{path}"
+
+    try:
+        resp = requests.get(url, impersonate="chrome120", timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ Gagal fetch Dealls: {e}")
+        return hasil
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    seen = set()
+
+    for a in soup.find_all("a", href=True):
+        href = a["href"]
+        path_only = href
+        if href.startswith(DEALLS_BASE):
+            path_only = href[len(DEALLS_BASE):]
+
+        m = DEALLS_JOB_LINK_RE.match(path_only)
+        if not m:
+            continue
+
+        if path_only in seen:
+            continue
+        seen.add(path_only)
+
+        slug_judul = m.group(2).replace("-", " ").title()
+        slug_perusahaan = m.group(3).replace("-", " ").title()
+
+        full_text = a.get_text(" ", strip=True)
+
+        tipe = "unknown"
+        if "Penuh waktu" in full_text:
+            tipe = "full-time"
+        elif "Paruh waktu" in full_text:
+            tipe = "part-time"
+        elif "Kontrak" in full_text:
+            tipe = "kontrak"
+        elif "Magang" in full_text:
+            tipe = "magang"
+
+        lokasi_match = re.search(r'•\s*([A-Za-zÀ-ÿ .\'-]+?)(?:Min\.|Rp|Negotiable|$)', full_text)
+        lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
+
+        gaji_match = re.search(r'(Rp\s?[\d.,]+\s*-\s*Rp\s?[\d.,]+)', full_text)
+        gaji = gaji_match.group(1) if gaji_match else (None if "Negotiable" not in full_text else None)
+
+        hasil.append({
+            "judul": slug_judul,
+            "perusahaan": slug_perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": tipe,
+            "kategori": None,
+            "deskripsi": "",
+            "gaji": gaji,
+            "sumber_platform": "dealls",
+            "sumber_url": f"{DEALLS_BASE}{path_only}",
+            "tanggal_post": date.today().isoformat(),
+        })
+
+        if len(hasil) >= limit:
+            break
+
+    if not hasil:
+        print("⚠️ 0 lowongan Dealls ditemukan. Cek apakah path pencarian masih valid "
+              "atau jalankan debug_page_structure() untuk verifikasi ulang.")
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER: LINKEDIN (guest API HTML)
+# ==========================================
 def scrape_linkedin(keyword: str = "software engineer", location: str = "Indonesia",
                      limit: int = 10) -> list[dict]:
     """
@@ -416,12 +484,10 @@ def scrape_linkedin(keyword: str = "software engineer", location: str = "Indones
     return hasil
 
 
+# ==========================================
+# GENERIC HTML / PLAYWRIGHT SCRAPER
+# ==========================================
 def generic_html_scraper(site_key: str, limit: int = 10) -> list[dict]:
-    """
-    Scraper generik berbasis CSS selector untuk situs statis (HTML sudah
-    berisi data lowongan tanpa perlu JS). Pakai untuk situs baru selain
-    yang sudah punya fungsi khusus (karir.com, glints, linkedin).
-    """
     cfg = SITE_CONFIGS.get(site_key)
     if not cfg:
         raise ValueError(f"Config untuk '{site_key}' belum ada di SITE_CONFIGS")
@@ -473,11 +539,6 @@ def generic_html_scraper(site_key: str, limit: int = 10) -> list[dict]:
 
 
 def generic_playwright_scraper(site_key: str, limit: int = 10, wait_selector: str | None = None) -> list[dict]:
-    """
-    Sama seperti generic_html_scraper() tapi merender halaman dengan browser
-    (Playwright/Chromium) dulu sebelum parsing HTML. Wajib dipakai untuk
-    situs yang kontennya muncul lewat JavaScript setelah page-load.
-    """
     from playwright.sync_api import sync_playwright
 
     cfg = SITE_CONFIGS.get(site_key)
@@ -530,13 +591,6 @@ def generic_playwright_scraper(site_key: str, limit: int = 10, wait_selector: st
 
 
 def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "debug_page.html"):
-    """
-    Fetch sebuah halaman lalu simpan HTML mentahnya ke file untuk diinspeksi manual.
-    Gunakan ini kalau selector di SITE_CONFIGS perlu diverifikasi/diperbaiki.
-
-    use_browser=True untuk situs yang render via JavaScript (kalau hasil
-    requests.get() biasa kosong/tidak ada job card sama sekali).
-    """
     if use_browser:
         from playwright.sync_api import sync_playwright
         with sync_playwright() as p:
