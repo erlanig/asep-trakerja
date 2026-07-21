@@ -1,11 +1,7 @@
 import time
 from datetime import datetime, date
-import uuid
-
-# 1. GANTI IMPORT REQUESTS
-# Hapus: import requests
-# Gunakan curl_cffi:
 from curl_cffi import requests
+from bs4 import BeautifulSoup
 
 # ==========================================
 # FUNGSI BANTUAN UMUM
@@ -18,8 +14,13 @@ def _parse_iso_date(iso_string: str) -> str:
     except ValueError:
         return date.today().isoformat()
 
+
+def _text_or_none(el):
+    return el.get_text(strip=True) if el else None
+
+
 # ==========================================
-# SCRAPER: KARIR.COM
+# SCRAPER: KARIR.COM (API)
 # ==========================================
 KARIR_BASE_API = "https://gateway2-beta.karir.com"
 KARIR_BASE_JOB_URL = "https://karir.com/opportunities/{id}"
@@ -42,7 +43,6 @@ def get_job_detail_karir(opportunity_id: int) -> str:
     url = f"{KARIR_BASE_API}/v1/opportunity/detail"
     body = {"opportunity_id": opportunity_id, "language": "id"}
     try:
-        # 2. TAMBAHKAN IMPERSONATE DI SINI
         resp = requests.post(url, headers=KARIR_HEADERS, json=body, timeout=10, impersonate="chrome110")
         resp.raise_for_status()
         data = resp.json().get("data", {})
@@ -64,7 +64,6 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
     }
 
     try:
-        # 3. TAMBAHKAN IMPERSONATE DI SINI
         resp = requests.post(url, headers=KARIR_HEADERS, json=body, timeout=15, impersonate="chrome110")
         resp.raise_for_status()
         payload = resp.json()
@@ -73,7 +72,7 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
         return hasil
 
     opportunities = payload.get("data", {}).get("opportunities", [])
-    
+
     for item in opportunities:
         job_id = item.get("id")
         judul = item.get("job_position")
@@ -82,15 +81,15 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 
         perusahaan = item.get("company_name")
         deskripsi_lengkap = get_job_detail_karir(job_id)
-        time.sleep(0.5) 
+        time.sleep(0.5)
 
         hasil.append({
             "judul": judul,
             "perusahaan": perusahaan or "Perusahaan dirahasiakan",
-            "lokasi": item.get("description") or "", 
+            "lokasi": item.get("description") or "",
             "tipe_kerja": "full-time",
             "kategori": None,
-            "deskripsi": deskripsi_lengkap, 
+            "deskripsi": deskripsi_lengkap,
             "gaji": _format_gaji_karir(item),
             "sumber_platform": "karir.com",
             "sumber_url": KARIR_BASE_JOB_URL.format(id=job_id),
@@ -101,13 +100,10 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 
 
 # ==========================================
-# SCRAPER: GLINTS.COM
+# SCRAPER: GLINTS.COM (API)
 # ==========================================
 GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
 
-# Bersihkan Header! 
-# Jangan masukkan User-Agent, Cookie, atau sec-ch-ua secara manual.
-# Biarkan curl_cffi yang menyuntikkannya secara otomatis agar tidak "belang".
 GLINTS_HEADERS = {
     "Accept": "*/*",
     "Content-Type": "application/json",
@@ -144,7 +140,7 @@ def _format_gaji_glints(salaries: list) -> str | None:
     min_amt = gaji.get("minAmount")
     max_amt = gaji.get("maxAmount")
     currency = gaji.get("CurrencyCode", "IDR")
-    
+
     if min_amt and max_amt:
         return f"{currency} {min_amt:,.0f} - {max_amt:,.0f}".replace(",", ".")
     return None
@@ -169,25 +165,14 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
         "query": GRAPHQL_QUERY
     }
 
-    # 1. BUKA SESI BROWSER VIRTUAL
-    # Impersonate diset di level sesi agar konsisten dari awal sampai akhir
     session = requests.Session(impersonate="chrome120")
 
     try:
-        # 2. PANCING COOKIES
-        # Kunjungi halaman web aslinya dulu untuk mendapatkan tiket/cookie keamanan
         session.get("https://glints.com/id/opportunities/jobs/explore", timeout=15)
-        
-        # Jeda 1 detik, pura-puranya user sedang scroll/membaca halaman
         time.sleep(1)
-
-        # 3. TEMBAK API
-        # Gunakan session.post (BUKAN requests.post). 
-        # Ini akan membawa semua cookies dari langkah ke-2!
         resp = session.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15)
         resp.raise_for_status()
         data = resp.json()
-        
     except Exception as e:
         print(f"❌ Gagal fetch API Glints: {e}")
         return hasil
@@ -199,17 +184,17 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
         judul = item.get("title")
         if not judul or not job_id:
             continue
-            
+
         perusahaan = item.get("company", {}).get("name") or "Perusahaan dirahasiakan"
         lokasi = item.get("city", {}).get("name") or "Indonesia"
-        
+
         hasil.append({
             "judul": judul,
             "perusahaan": perusahaan,
             "lokasi": lokasi,
             "tipe_kerja": item.get("type", "").lower(),
             "kategori": None,
-            "deskripsi": "", 
+            "deskripsi": "",
             "gaji": _format_gaji_glints(item.get("salaries", [])),
             "sumber_platform": "glints",
             "sumber_url": f"https://glints.com/id/opportunities/jobs/{job_id}",
@@ -218,26 +203,284 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
 
     return hasil
 
+
+# ==========================================
+# LAPIS HTML/CSS SELECTOR — untuk situs tanpa API publik
+# ==========================================
+# Dipakai untuk LinkedIn, Kalibrr, dan situs sejenis yang lebih mudah/stabil
+# di-scrape lewat HTML + CSS selector daripada lewat API tersembunyi.
+#
+# CATATAN LINKEDIN:
+# LinkedIn punya endpoint publik (tanpa login) yang dipakai halaman "guest" job search,
+# mengembalikan potongan HTML berisi daftar lowongan. Selector di bawah adalah pola umum
+# yang dipakai halaman tersebut, tapi bisa berubah sewaktu-waktu tanpa pemberitahuan,
+# dan LinkedIn membatasi rate/kadang memblokir IP yang scraping terlalu sering — jadi
+# pakai time.sleep() antar request dan jangan set limit terlalu besar. ToS LinkedIn juga
+# secara eksplisit melarang scraping otomatis, jadi ini murni "bisa secara teknis",
+# risiko pemblokiran akun/IP tetap ada.
+#
+# CATATAN KALIBRR:
+# Selector di bawah masih PLACEHOLDER karena saya tidak punya akses jaringan ke
+# kalibrr.com dari sandbox ini. Isi sendiri lewat debug_page_structure() di bagian
+# paling bawah file ini (Inspect Element di browser Anda), lalu update dictionary ini.
+
+SITE_CONFIGS = {
+    "linkedin": {
+        "search_url": (
+            "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+            "?keywords={keyword}&location={location}&start={start}"
+        ),
+        "impersonate": "chrome120",
+        "needs_browser": False,
+        "selector_job_card": "li",
+        "selector_title": "h3.base-search-card__title",
+        "selector_company": "h4.base-search-card__subtitle",
+        "selector_location": "span.job-search-card__location",
+        "selector_link": "a.base-card__full-link",
+        "link_prefix": "",
+    },
+    "kalibrr": {
+        "search_url": "https://www.kalibrr.com/id-ID/job-board/te/1",
+        "impersonate": "chrome120",
+        "needs_browser": True,  # kemungkinan besar render via JS, cek dulu
+        "selector_job_card": "div.k-card",          # PLACEHOLDER, verifikasi ulang
+        "selector_title": "h2, .job-title",           # PLACEHOLDER
+        "selector_company": ".company-name",          # PLACEHOLDER
+        "selector_location": ".job-location",          # PLACEHOLDER
+        "selector_link": "a",                           # PLACEHOLDER
+        "link_prefix": "https://www.kalibrr.com",
+    },
+    # Tambah situs lain di sini dengan pola yang sama.
+}
+
+
+def scrape_linkedin(keyword: str = "software engineer", location: str = "Indonesia",
+                     limit: int = 10) -> list[dict]:
+    """
+    Scrape LinkedIn lewat endpoint publik "guest" (tanpa login) yang dipakai
+    halaman pencarian lowongan versi non-login. Mengembalikan potongan HTML
+    yang di-parse dengan CSS selector.
+    """
+    print("Mencari lowongan di LinkedIn...")
+    hasil = []
+    cfg = SITE_CONFIGS["linkedin"]
+
+    url = cfg["search_url"].format(
+        keyword=keyword.replace(" ", "%20"),
+        location=location.replace(" ", "%20"),
+        start=0,
+    )
+
+    try:
+        resp = requests.get(url, impersonate=cfg["impersonate"], timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ Gagal fetch LinkedIn: {e}")
+        return hasil
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    cards = soup.select(cfg["selector_job_card"])[:limit]
+
+    if not cards:
+        print("⚠️ 0 job card LinkedIn ditemukan — kemungkinan struktur HTML sudah berubah "
+              "atau request diblokir. Jalankan debug_page_structure(url) untuk cek ulang.")
+        return hasil
+
+    for card in cards:
+        judul = _text_or_none(card.select_one(cfg["selector_title"]))
+        if not judul:
+            continue
+
+        perusahaan = _text_or_none(card.select_one(cfg["selector_company"])) or "Tidak diketahui"
+        lokasi = _text_or_none(card.select_one(cfg["selector_location"])) or location
+
+        link_el = card.select_one(cfg["selector_link"])
+        url_lowongan = link_el.get("href").split("?")[0] if link_el and link_el.get("href") else None
+
+        hasil.append({
+            "judul": judul,
+            "perusahaan": perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": "unknown",
+            "kategori": None,
+            "deskripsi": "",
+            "gaji": None,
+            "sumber_platform": "linkedin",
+            "sumber_url": url_lowongan,
+            "tanggal_post": date.today().isoformat(),
+        })
+
+    return hasil
+
+
+def generic_html_scraper(site_key: str, limit: int = 10) -> list[dict]:
+    """
+    Scraper generik berbasis CSS selector untuk situs statis (HTML sudah
+    berisi data lowongan tanpa perlu JS). Pakai untuk situs baru selain
+    yang sudah punya fungsi khusus (karir.com, glints, linkedin).
+    """
+    cfg = SITE_CONFIGS.get(site_key)
+    if not cfg:
+        raise ValueError(f"Config untuk '{site_key}' belum ada di SITE_CONFIGS")
+
+    print(f"Mencari lowongan di {site_key} (HTML scraping)...")
+    hasil = []
+
+    try:
+        resp = requests.get(cfg["search_url"], impersonate=cfg.get("impersonate", "chrome120"), timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ Gagal fetch halaman {site_key}: {e}")
+        return hasil
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    cards = soup.select(cfg["selector_job_card"])[:limit]
+
+    if not cards:
+        print(f"⚠️ 0 job card ditemukan untuk '{site_key}'. Selector mungkin salah/berubah, "
+              f"atau situs ini render pakai JavaScript (coba generic_playwright_scraper()).")
+        return hasil
+
+    for card in cards:
+        judul = _text_or_none(card.select_one(cfg["selector_title"]))
+        if not judul:
+            continue
+
+        perusahaan = _text_or_none(card.select_one(cfg["selector_company"])) or "Tidak diketahui"
+        lokasi = _text_or_none(card.select_one(cfg["selector_location"])) or ""
+
+        link_el = card.select_one(cfg["selector_link"])
+        href = link_el.get("href") if link_el else None
+        url_lengkap = (cfg.get("link_prefix", "") + href) if href and href.startswith("/") else href
+
+        hasil.append({
+            "judul": judul,
+            "perusahaan": perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": "unknown",
+            "kategori": None,
+            "deskripsi": "",
+            "gaji": None,
+            "sumber_platform": site_key,
+            "sumber_url": url_lengkap,
+            "tanggal_post": date.today().isoformat(),
+        })
+
+    return hasil
+
+
+def generic_playwright_scraper(site_key: str, limit: int = 10, wait_selector: str | None = None) -> list[dict]:
+    """
+    Sama seperti generic_html_scraper() tapi merender halaman dengan browser
+    (Playwright/Chromium) dulu sebelum parsing HTML. Wajib dipakai untuk
+    situs yang kontennya muncul lewat JavaScript setelah page-load.
+    """
+    from playwright.sync_api import sync_playwright
+
+    cfg = SITE_CONFIGS.get(site_key)
+    if not cfg:
+        raise ValueError(f"Config untuk '{site_key}' belum ada di SITE_CONFIGS")
+
+    print(f"Mencari lowongan di {site_key} (Playwright/browser render)...")
+    hasil = []
+
+    with sync_playwright() as p:
+        browser = p.chromium.launch(headless=True)
+        page = browser.new_page()
+        try:
+            page.goto(cfg["search_url"], timeout=30000)
+            page.wait_for_selector(wait_selector or cfg["selector_job_card"], timeout=15000)
+            html = page.content()
+        except Exception as e:
+            print(f"❌ Gagal render halaman {site_key}: {e}")
+            browser.close()
+            return hasil
+        browser.close()
+
+    soup = BeautifulSoup(html, "html.parser")
+    cards = soup.select(cfg["selector_job_card"])[:limit]
+
+    for card in cards:
+        judul = _text_or_none(card.select_one(cfg["selector_title"]))
+        if not judul:
+            continue
+        perusahaan = _text_or_none(card.select_one(cfg["selector_company"])) or "Tidak diketahui"
+        lokasi = _text_or_none(card.select_one(cfg["selector_location"])) or ""
+        link_el = card.select_one(cfg["selector_link"])
+        href = link_el.get("href") if link_el else None
+        url_lengkap = (cfg.get("link_prefix", "") + href) if href and href.startswith("/") else href
+
+        hasil.append({
+            "judul": judul,
+            "perusahaan": perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": "unknown",
+            "kategori": None,
+            "deskripsi": "",
+            "gaji": None,
+            "sumber_platform": site_key,
+            "sumber_url": url_lengkap,
+            "tanggal_post": date.today().isoformat(),
+        })
+
+    return hasil
+
+
+def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "debug_page.html"):
+    """
+    Fetch sebuah halaman lalu simpan HTML mentahnya ke file untuk diinspeksi manual.
+    Gunakan ini kalau selector di SITE_CONFIGS perlu diverifikasi/diperbaiki.
+
+    use_browser=True untuk situs yang render via JavaScript (kalau hasil
+    requests.get() biasa kosong/tidak ada job card sama sekali).
+    """
+    if use_browser:
+        from playwright.sync_api import sync_playwright
+        with sync_playwright() as p:
+            browser = p.chromium.launch(headless=True)
+            page = browser.new_page()
+            page.goto(url, timeout=30000)
+            page.wait_for_timeout(3000)
+            html = page.content()
+            browser.close()
+    else:
+        resp = requests.get(url, impersonate="chrome120", timeout=15)
+        html = resp.text
+
+    with open(save_to, "w", encoding="utf-8") as f:
+        f.write(html)
+
+    soup = BeautifulSoup(html, "html.parser")
+    print(f"✅ HTML disimpan ke: {save_to} ({len(html)} karakter)")
+    print(f"   Jumlah tag <a>: {len(soup.find_all('a'))}, tag <div>: {len(soup.find_all('div'))}")
+    print("   Buka file di atas dan cari pola job card secara manual (Ctrl+F judul lowongan yang kamu tahu).")
+
+
 # ==========================================
 # AGGREGATOR UTAMA
 # ==========================================
-def scrape_semua_sumber(limit_per_sumber: int = 5) -> list[dict]:
+def scrape_semua_sumber(limit_per_sumber: int = 5, keyword_linkedin: str = "software engineer") -> list[dict]:
     semua_lowongan = []
-    
-    data_karir = scrape_karir_com(limit=limit_per_sumber)
-    semua_lowongan.extend(data_karir)
-    
+
+    semua_lowongan.extend(scrape_karir_com(limit=limit_per_sumber))
     time.sleep(1)
 
-    data_glints = scrape_glints(page_size=limit_per_sumber)
-    semua_lowongan.extend(data_glints)
+    semua_lowongan.extend(scrape_glints(page_size=limit_per_sumber))
+    time.sleep(1)
+
+    semua_lowongan.extend(scrape_linkedin(keyword=keyword_linkedin, limit=limit_per_sumber))
+
+    # Kalibrr sengaja tidak diikutkan otomatis dulu — selector-nya masih placeholder,
+    # isi dulu SITE_CONFIGS["kalibrr"], baru aktifkan baris di bawah ini:
+    # time.sleep(1)
+    # semua_lowongan.extend(generic_playwright_scraper("kalibrr", limit=limit_per_sumber))
 
     return semua_lowongan
 
 
 if __name__ == "__main__":
     data_gabungan = scrape_semua_sumber(limit_per_sumber=5)
-    
+
     print(f"\n✅ Total Ditemukan: {len(data_gabungan)} lowongan dari berbagai sumber:\n")
     for d in data_gabungan:
         print(f"[{d['sumber_platform'].upper()}] {d['judul']} @ {d['perusahaan']} ({d['lokasi']})")

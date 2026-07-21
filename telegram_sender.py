@@ -26,7 +26,10 @@ def format_pesan(lowongan_list: list[dict]) -> str:
             f"🔗 [Lihat detail & lamar]({lo['sumber_url']})\n"
         )
 
-    baris.append("\n_Info dikumpulkan otomatis oleh bot. Cek detail lengkap di link masing-masing._")
+    baris.append(
+        "\n_Info dikumpulkan otomatis oleh bot. Cek detail lengkap di link masing-masing._"
+        "\n\n🚀 Oleh Asep TraKerja | #ForABetterLife"
+    )
     return "\n".join(baris)
 
 
