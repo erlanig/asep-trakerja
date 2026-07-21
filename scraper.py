@@ -1,22 +1,3 @@
-"""
-Fetcher lowongan kerja dari karir.com, menggunakan API internal mereka
-(ditemukan & dikonfirmasi lewat DevTools > Network > XHR).
-
-Endpoint: POST https://gateway2-beta.karir.com/v2/search/opportunities
-Tidak butuh API key/auth - cukup header Origin & Referer yang meniru browser asli.
-
-CATATAN PENTING:
-- Ini API internal (tidak resmi/tidak didokumentasikan publik), bisa berubah
-  sewaktu-waktu tanpa pemberitahuan dari karir.com. Selalu monitor.
-- `sumber_url` di bawah PERLU DIVERIFIKASI - kirim contoh URL lowongan asli
-  (hasil klik di browser) untuk konfirmasi pola-nya sudah benar.
-- job_function_ids mengacu ke daftar kategori dari endpoint
-  /v1/master_job_functions (contoh: 14 = "Layanan Pelanggan").
-  Kosongkan list ini (None/[]) untuk coba ambil dari SEMUA kategori sekaligus -
-  kalau ternyata API mewajibkan minimal 1 kategori, perlu looping per kategori.
-- Tetap pakai jeda antar request, jangan spam endpoint ini.
-"""
-
 import time
 import requests
 from datetime import datetime, date
@@ -30,11 +11,11 @@ HEADERS = {
     "Origin": "https://karir.com",
     "Referer": "https://karir.com/",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-                  "(KHTML, like Gecko) Chrome/125.0.0.0 Safari/537.36",
+                  "(KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
 }
 
-# TODO: verifikasi pola URL ini dengan buka 1 lowongan asli di browser, kirim contohnya.
-BASE_JOB_URL = "https://www.karir.com/lowongan-kerja/{id}"
+# [DIPERBARUI] Pola URL asli web karir.com
+BASE_JOB_URL = "https://karir.com/opportunities/{id}"
 
 
 def _format_tanggal(iso_string: str) -> str:
@@ -54,13 +35,35 @@ def _format_gaji(item: dict) -> str | None:
     return None
 
 
+def get_job_detail(opportunity_id: int) -> str:
+    """
+    [BARU] Mengambil deskripsi lengkap menggunakan endpoint detail yang ditemukan.
+    """
+    url = f"{BASE_API}/v1/opportunity/detail"
+    body = {
+        "opportunity_id": opportunity_id,
+        "language": "id"
+    }
+    
+    try:
+        resp = requests.post(url, headers=HEADERS, json=body, timeout=10)
+        resp.raise_for_status()
+        data = resp.json().get("data", {})
+        
+        # Mengambil isi deskripsi. 
+        # (Jika struktur JSON berbeda, ubah key "job_description" sesuai hasil inspect browser)
+        deskripsi = data.get("job_description") or data.get("description") or ""
+        return deskripsi
+        
+    except Exception as e:
+        print(f"⚠️ Gagal fetch detail untuk ID {opportunity_id}: {e}")
+        return ""
+
+
 def scrape_karir_com(job_function_ids: list[int] | None = None,
-                      limit: int = 20, offset: int = 0) -> list[dict]:
+                     limit: int = 20, offset: int = 0) -> list[dict]:
     """
     Ambil daftar lowongan dari API POST karir.com.
-
-    job_function_ids: list ID kategori (lihat master_job_functions.py untuk daftar
-                       lengkap). None/[] = coba ambil tanpa filter kategori dulu.
     """
     hasil = []
     url = f"{BASE_API}/v2/search/opportunities"
@@ -93,16 +96,22 @@ def scrape_karir_com(job_function_ids: list[int] | None = None,
         if not judul or not job_id:
             continue
 
+        # (Opsional) Mengambil detail deskripsi pekerjaan
+        # Jika proses scraping terasa terlalu lama karena butuh request 1-1, 
+        # Anda bisa menonaktifkan baris ini atau memanggilnya secara asynchronous.
+        deskripsi_lengkap = get_job_detail(job_id)
+        time.sleep(0.5) # Jeda agar tidak terkena rate limit dari server
+
         hasil.append({
             "judul": judul,
             "perusahaan": perusahaan or "Perusahaan dirahasiakan",
-            "lokasi": item.get("description") or "",  # field "description" API ini isinya lokasi
+            "lokasi": item.get("description") or "", 
             "tipe_kerja": "full-time",
             "kategori": None,
-            "deskripsi": "",
+            "deskripsi": deskripsi_lengkap, 
             "gaji": _format_gaji(item),
             "sumber_platform": "karir.com",
-            "sumber_url": BASE_JOB_URL.format(id=job_id),
+            "sumber_url": BASE_JOB_URL.format(id=job_id), # [DIPERBARUI]
             "tanggal_post": _format_tanggal(item.get("posted_at")),
         })
 
@@ -110,20 +119,16 @@ def scrape_karir_com(job_function_ids: list[int] | None = None,
 
 
 def scrape_semua_sumber() -> list[dict]:
-    """
-    Panggil semua fetcher sumber yang aktif, gabungkan hasilnya.
-    """
     semua = []
-
-    semua.extend(scrape_karir_com(limit=20))
-    time.sleep(1)
-
+    semua.extend(scrape_karir_com(limit=10)) # Limit diperkecil untuk testing
     return semua
 
 
 if __name__ == "__main__":
-    # Test cepat manual: python scraper.py
-    data = scrape_karir_com(limit=10)
-    print(f"Ditemukan {len(data)} lowongan:")
+    data = scrape_karir_com(limit=5)
+    print(f"\nDitemukan {len(data)} lowongan:\n")
     for d in data:
-        print(f"  - {d['judul']} @ {d['perusahaan']} ({d['lokasi']}) | gaji: {d['gaji']} -> {d['sumber_url']}")
+        print(f"  - {d['judul']} @ {d['perusahaan']} ({d['lokasi']})")
+        print(f"    Gaji: {d['gaji']}")
+        print(f"    Link: {d['sumber_url']}")
+        print("-" * 50)
