@@ -1,5 +1,6 @@
 import time
 from datetime import datetime, date
+import uuid
 
 # 1. GANTI IMPORT REQUESTS
 # Hapus: import requests
@@ -103,14 +104,26 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 # SCRAPER: GLINTS.COM
 # ==========================================
 GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
+dummy_device_id = str(uuid.uuid4())
 
 # Header lebih bersih karena curl_cffi otomatis mengurus fingerprint browser
 GLINTS_HEADERS = {
     "Accept": "*/*",
+    "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
     "Content-Type": "application/json",
     "Origin": "https://glints.com",
     "Referer": "https://glints.com/id/opportunities/jobs/explore",
-    "x-glints-country-code": "ID", 
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/120.0.0.0 Safari/537.36",
+    "x-glints-country-code": "ID",
+    # Header keamanan browser (sangat penting untuk bypass WAF)
+    "sec-ch-ua": '"Not_A Brand";v="8", "Chromium";v="120", "Google Chrome";v="120"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    # Kirimkan device_id palsu
+    "Cookie": f"device_id={dummy_device_id};"
 }
 
 GRAPHQL_QUERY = """
@@ -167,8 +180,8 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
     }
 
     try:
-        # 4. TAMBAHKAN IMPERSONATE DI SINI UNTUK GLINTS
-        resp = requests.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15, impersonate="chrome110")
+        # Gunakan impersonate versi yang lebih baru (chrome120) agar sinkron dengan Header sec-ch-ua di atas
+        resp = requests.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15, impersonate="chrome120")
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
