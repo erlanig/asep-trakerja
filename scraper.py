@@ -30,17 +30,37 @@ Perubahan utama dari versi sebelumnya:
    dipantau saat dijalankan sebagai cron/service, tapi tetap tampil di
    console seperti sebelumnya.
 
-CATATAN PENTING soal Glints:
-Glints dilindungi Cloudflare bot-management. Cookie warm-up + header
-lengkap akan memperbaiki sebagian besar kasus 403, tapi Cloudflare bisa
-saja meningkatkan proteksinya kapan saja (termasuk minta JS challenge
-yang tidak bisa diselesaikan tanpa browser asli). Kalau warm-up masih
-kena 403 terus-menerus, opsi realistis:
-  a) pasang Playwright (`pip install playwright && playwright install chromium`)
-     — sudah otomatis dipakai sebagai fallback di sini kalau tersedia.
-  b) pakai residential proxy / provider scraping pihak ketiga.
-Tidak ada "satu baris kode" yang bisa menjamin bypass permanen — ini sifat
-dasar dari WAF yang terus berubah, bukan bug di scraper ini.
+CATATAN PENTING soal Glints & JobStreet (kalau masih 403 terus-menerus):
+Kalau warm-up + retry + header lengkap MASIH kena 403 terus-menerus di
+kedua situs ini, penyebabnya kemungkinan besar BUKAN lagi soal cookie
+atau header — kemungkinan besar IP server tempat kode ini dijalankan
+(VPS, cloud compute, sandbox) sudah masuk daftar blokir Cloudflare/WAF
+di level jaringan (banyak platform besar blok seluruh range IP
+datacenter/cloud, terlepas dari header apa pun yang dikirim). Ini bukan
+sesuatu yang bisa diperbaiki lewat kode saja. Opsi realistis:
+  a) jalankan dari IP residensial (laptop/rumah) untuk tes — kalau di
+     laptop berhasil tapi di server tidak, itu konfirmasi block di level IP.
+  b) pasang Playwright (`pip install playwright && playwright install chromium`)
+     — otomatis dipakai sebagai fallback untuk Glints kalau tersedia, tapi
+     kalau block-nya di level IP, Playwright pun tidak akan menembus.
+  c) pakai residential/mobile proxy, atau layanan scraping pihak ketiga
+     yang rotasi IP otomatis.
+Karena dua sumber ini rawan diblokir di level infrastruktur, versi ini
+menambah banyak sumber API publik lain (lihat di bawah) yang jauh lebih
+stabil dijalankan dari server/cloud.
+
+6. Sumber tambahan (update kedua) — API/RSS publik yang tidak dilindungi
+   Cloudflare-tier WAF seperti Glints/JobStreet:
+   - Remotive, Jobicy, Himalayas — API JSON remote-job publik
+   - We Work Remotely — RSS feed publik
+   - Greenhouse & Lever — API job-board publik yang dipakai banyak startup
+     untuk menampilkan lowongan mereka sendiri di careers page (generic
+     scraper — tinggal isi daftar company slug/board token untuk "tembus"
+     langsung ke web company masing-masing, sesuai permintaan awal)
+
+7. LinkedIn sekarang paginasi (bukan cuma ~10 kartu di 1 halaman) dan
+   punya limit independen dari `limit_per_sumber`, karena sebelumnya
+   hasilnya selalu mentok di angka kecil walau limit dinaikkan.
 """
 
 from __future__ import annotations
@@ -363,8 +383,15 @@ def _scrape_glints_via_html(keyword: str, location: str, limit: int) -> list[dic
     session = _warm_up_session(GLINTS_HOMEPAGE, impersonate)
 
     base_url = "https://glints.com/id/opportunities/jobs/explore"
-    params = {"keyword": keyword, "country": "ID", "locationName": location}
-    query_string = "&".join(f"{k}={v.replace(' ', '%20')}" for k, v in params.items() if v)
+    # "All Cities/Provinces" adalah value locationName default yang dipakai
+    # UI Glints sendiri ketika tidak memilih kota spesifik (dikonfirmasi dari
+    # URL asli situsnya) — beda dari "Indonesia" yang dipakai versi lama.
+    params = {
+        "keyword": keyword,
+        "country": "ID",
+        "locationName": location if location and location != "Indonesia" else "All Cities/Provinces",
+    }
+    query_string = "&".join(f"{k}={v.replace(' ', '%20').replace('/', '%2F')}" for k, v in params.items() if v)
     url = f"{base_url}?{query_string}" if query_string else base_url
 
     headers = {
@@ -404,8 +431,12 @@ def _scrape_glints_via_playwright(keyword: str, location: str, limit: int) -> li
         return []
 
     base_url = "https://glints.com/id/opportunities/jobs/explore"
-    params = {"keyword": keyword, "country": "ID", "locationName": location}
-    query_string = "&".join(f"{k}={v.replace(' ', '%20')}" for k, v in params.items() if v)
+    params = {
+        "keyword": keyword,
+        "country": "ID",
+        "locationName": location if location and location != "Indonesia" else "All Cities/Provinces",
+    }
+    query_string = "&".join(f"{k}={v.replace(' ', '%20').replace('/', '%2F')}" for k, v in params.items() if v)
     url = f"{base_url}?{query_string}" if query_string else base_url
 
     hasil = []
@@ -652,6 +683,306 @@ def scrape_arbeitnow(keyword: str = "", limit: int = 10) -> list[dict]:
 
 
 # ==========================================
+# SCRAPER: REMOTIVE (API JSON publik, remote-job aggregator)
+# ==========================================
+REMOTIVE_API = "https://remotive.com/api/remote-jobs"
+
+
+def scrape_remotive(keyword: str = "", limit: int = 10) -> list[dict]:
+    log.info("Mencari lowongan di Remotive...")
+    hasil = []
+    session = _warm_up_session("https://remotive.com/", _random_impersonate())
+    params = {"search": keyword} if keyword else {}
+
+    try:
+        resp = _request_with_retry(session, "GET", REMOTIVE_API, params=params, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("❌ Gagal fetch Remotive: %s", e)
+        return hasil
+
+    for job in data.get("jobs", [])[:limit]:
+        hasil.append({
+            "judul": job.get("title"),
+            "perusahaan": job.get("company_name") or "Tidak diketahui",
+            "lokasi": job.get("candidate_required_location") or "Remote",
+            "tipe_kerja": (job.get("job_type") or "full_time").replace("_", "-"),
+            "kategori": job.get("category"),
+            "deskripsi": re.sub("<[^<]+?>", "", job.get("description") or "")[:1000],
+            "gaji": job.get("salary") or None,
+            "sumber_platform": "remotive",
+            "sumber_url": job.get("url"),
+            "tanggal_post": _parse_iso_date(job.get("publication_date")),
+        })
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER: JOBICY (API JSON publik, remote-job aggregator)
+# ==========================================
+JOBICY_API = "https://jobicy.com/api/v2/remote-jobs"
+
+
+def scrape_jobicy(keyword: str = "", limit: int = 10) -> list[dict]:
+    """
+    NB: skema JSON di sini mengikuti dokumentasi publik Jobicy — kalau nama
+    field berubah di masa depan, cukup sesuaikan `.get(...)` di bawah (kode
+    memakai `.get()` di semua tempat supaya tidak crash kalau ada field hilang).
+    """
+    log.info("Mencari lowongan di Jobicy...")
+    hasil = []
+    session = _warm_up_session("https://jobicy.com/", _random_impersonate())
+    params = {"count": min(limit * 2, 50)}
+    if keyword:
+        params["tag"] = keyword
+
+    try:
+        resp = _request_with_retry(session, "GET", JOBICY_API, params=params, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("❌ Gagal fetch Jobicy: %s", e)
+        return hasil
+
+    for job in data.get("jobs", [])[:limit]:
+        gaji = None
+        if job.get("annualSalaryMin") or job.get("annualSalaryMax"):
+            mata_uang = job.get("salaryCurrency", "")
+            gaji = f"{mata_uang} {job.get('annualSalaryMin', '?')} - {job.get('annualSalaryMax', '?')} / tahun".strip()
+
+        hasil.append({
+            "judul": job.get("jobTitle"),
+            "perusahaan": job.get("companyName") or "Tidak diketahui",
+            "lokasi": job.get("jobGeo") or "Remote",
+            "tipe_kerja": (job.get("jobType") or ["unknown"])[0] if isinstance(job.get("jobType"), list) else (job.get("jobType") or "unknown"),
+            "kategori": job.get("jobIndustry", [None])[0] if isinstance(job.get("jobIndustry"), list) else job.get("jobIndustry"),
+            "deskripsi": re.sub("<[^<]+?>", "", job.get("jobExcerpt") or "")[:1000],
+            "gaji": gaji,
+            "sumber_platform": "jobicy",
+            "sumber_url": job.get("url"),
+            "tanggal_post": _parse_iso_date(job.get("pubDate")),
+        })
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER: HIMALAYAS (API JSON publik, remote-job aggregator)
+# ==========================================
+HIMALAYAS_API = "https://himalayas.app/jobs/api"
+
+
+def scrape_himalayas(keyword: str = "", limit: int = 10) -> list[dict]:
+    """NB sama seperti Jobicy: skema field best-effort, pakai `.get()` defensif."""
+    log.info("Mencari lowongan di Himalayas...")
+    hasil = []
+    session = _warm_up_session("https://himalayas.app/", _random_impersonate())
+    params = {"limit": min(limit * 2, 50)}
+
+    try:
+        resp = _request_with_retry(session, "GET", HIMALAYAS_API, params=params, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("❌ Gagal fetch Himalayas: %s", e)
+        return hasil
+
+    for job in data.get("jobs", [])[:limit * 2]:
+        judul = job.get("title")
+        perusahaan = job.get("companyName") or (job.get("company") or {}).get("name")
+        if not judul or not perusahaan:
+            continue
+
+        if keyword and keyword.lower() not in judul.lower():
+            continue
+
+        lokasi_list = job.get("locationRestrictions") or []
+        lokasi = ", ".join(lokasi_list) if lokasi_list else "Remote"
+
+        gaji = None
+        if job.get("minSalary") or job.get("maxSalary"):
+            gaji = f"${job.get('minSalary', '?')} - ${job.get('maxSalary', '?')}"
+
+        slug = job.get("guid") or job.get("slug") or ""
+        hasil.append({
+            "judul": judul,
+            "perusahaan": perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": (job.get("employmentType") or "unknown").lower().replace("_", "-"),
+            "kategori": ", ".join(job.get("categories", [])[:3]) or None,
+            "deskripsi": re.sub("<[^<]+?>", "", job.get("excerpt") or "")[:1000],
+            "gaji": gaji,
+            "sumber_platform": "himalayas",
+            "sumber_url": f"https://himalayas.app/companies/{slug}" if slug else "https://himalayas.app/jobs",
+            "tanggal_post": _parse_iso_date(job.get("pubDate")),
+        })
+
+        if len(hasil) >= limit:
+            break
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER: WE WORK REMOTELY (RSS feed publik)
+# ==========================================
+WWR_RSS_URL = "https://weworkremotely.com/categories/remote-programming-jobs.rss"
+
+
+def scrape_weworkremotely(limit: int = 10) -> list[dict]:
+    log.info("Mencari lowongan di We Work Remotely...")
+    hasil = []
+    session = _warm_up_session("https://weworkremotely.com/", _random_impersonate())
+
+    try:
+        resp = _request_with_retry(session, "GET", WWR_RSS_URL, headers={"Accept": "application/rss+xml, application/xml"})
+        resp.raise_for_status()
+    except Exception as e:
+        log.error("❌ Gagal fetch We Work Remotely: %s", e)
+        return hasil
+
+    try:
+        soup = BeautifulSoup(resp.text, "xml")
+    except Exception:
+        soup = BeautifulSoup(resp.text, "html.parser")
+
+    items = soup.find_all("item")[:limit]
+    for item in items:
+        judul_lengkap = _text_or_none(item.find("title")) or ""
+        # Format judul RSS-nya biasanya "Nama Perusahaan: Judul Posisi"
+        if ":" in judul_lengkap:
+            perusahaan, judul = judul_lengkap.split(":", 1)
+        else:
+            perusahaan, judul = "Tidak diketahui", judul_lengkap
+
+        link = _text_or_none(item.find("link"))
+        deskripsi_html = _text_or_none(item.find("description")) or ""
+        pub_date = _text_or_none(item.find("pubDate"))
+
+        try:
+            tanggal = datetime.strptime(pub_date, "%a, %d %b %Y %H:%M:%S %z").date().isoformat() if pub_date else date.today().isoformat()
+        except ValueError:
+            tanggal = date.today().isoformat()
+
+        hasil.append({
+            "judul": judul.strip(),
+            "perusahaan": perusahaan.strip(),
+            "lokasi": "Remote",
+            "tipe_kerja": "unknown",
+            "kategori": "Programming",
+            "deskripsi": re.sub("<[^<]+?>", "", deskripsi_html)[:1000],
+            "gaji": None,
+            "sumber_platform": "weworkremotely",
+            "sumber_url": link,
+            "tanggal_post": tanggal,
+        })
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER GENERIK: GREENHOUSE & LEVER (ATS publik yang dipakai banyak
+# startup untuk memajang lowongan di careers page mereka sendiri)
+# ==========================================
+# Ini yang paling dekat dengan permintaan "tembus web company masing-masing":
+# Greenhouse & Lever adalah penyedia ATS yang API job-board-nya memang publik
+# dan tanpa proteksi bot berat (dirancang untuk ditempel di website company).
+# Isi daftar di bawah dengan board_token/company_slug perusahaan yang kamu
+# incar. Cara cari token/slug-nya: buka careers page perusahaan tsb → lihat
+# Network tab (DevTools) saat halaman lowongan dimuat → cari request ke
+# `boards-api.greenhouse.io/v1/boards/<TOKEN>/jobs` atau
+# `api.lever.co/v0/postings/<SLUG>`. Dua contoh di bawah untuk ilustrasi
+# format saja — verifikasi ulang token/slug-nya sebelum dipakai serius,
+# karena bisa berbeda dari nama brand perusahaan.
+GREENHOUSE_BOARD_TOKENS: list[str] = [
+    # "xendit",
+]
+LEVER_COMPANY_SLUGS: list[str] = [
+    # "carro",
+]
+
+
+def scrape_greenhouse(board_token: str, limit: int = 20) -> list[dict]:
+    url = f"https://boards-api.greenhouse.io/v1/boards/{board_token}/jobs"
+    hasil = []
+    session = _warm_up_session("https://boards.greenhouse.io/", _random_impersonate())
+
+    try:
+        resp = _request_with_retry(session, "GET", url, params={"content": "true"}, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("❌ Gagal fetch Greenhouse (%s): %s", board_token, e)
+        return hasil
+
+    for job in data.get("jobs", [])[:limit]:
+        lokasi = (job.get("location") or {}).get("name") or "Tidak diketahui"
+        deskripsi = re.sub("<[^<]+?>", "", job.get("content") or "")[:1000]
+
+        hasil.append({
+            "judul": job.get("title"),
+            "perusahaan": board_token.title(),
+            "lokasi": lokasi,
+            "tipe_kerja": "unknown",
+            "kategori": (job.get("departments") or [{}])[0].get("name"),
+            "deskripsi": deskripsi,
+            "gaji": None,
+            "sumber_platform": f"greenhouse:{board_token}",
+            "sumber_url": job.get("absolute_url"),
+            "tanggal_post": _parse_iso_date(job.get("updated_at")),
+        })
+
+    return hasil
+
+
+def scrape_lever(company_slug: str, limit: int = 20) -> list[dict]:
+    url = f"https://api.lever.co/v0/postings/{company_slug}"
+    hasil = []
+    session = _warm_up_session(f"https://jobs.lever.co/{company_slug}", _random_impersonate())
+
+    try:
+        resp = _request_with_retry(session, "GET", url, params={"mode": "json"}, headers={"Accept": "application/json"})
+        resp.raise_for_status()
+        data = resp.json()
+    except Exception as e:
+        log.error("❌ Gagal fetch Lever (%s): %s", company_slug, e)
+        return hasil
+
+    for job in data[:limit]:
+        categories = job.get("categories") or {}
+        deskripsi = re.sub("<[^<]+?>", "", job.get("descriptionPlain") or job.get("description") or "")[:1000]
+
+        hasil.append({
+            "judul": job.get("text"),
+            "perusahaan": company_slug.title(),
+            "lokasi": categories.get("location") or "Tidak diketahui",
+            "tipe_kerja": (categories.get("commitment") or "unknown").lower().replace(" ", "-"),
+            "kategori": categories.get("team"),
+            "deskripsi": deskripsi,
+            "gaji": None,
+            "sumber_platform": f"lever:{company_slug}",
+            "sumber_url": job.get("hostedUrl"),
+            "tanggal_post": _parse_iso_date(str(job.get("createdAt", ""))) if job.get("createdAt") else date.today().isoformat(),
+        })
+
+    return hasil
+
+
+def scrape_semua_ats(limit_per_company: int = 20) -> list[dict]:
+    """Jalankan scrape_greenhouse/scrape_lever untuk semua token/slug terdaftar di atas."""
+    hasil = []
+    for token in GREENHOUSE_BOARD_TOKENS:
+        hasil.extend(scrape_greenhouse(token, limit=limit_per_company))
+        time.sleep(random.uniform(0.5, 1.0))
+    for slug in LEVER_COMPANY_SLUGS:
+        hasil.extend(scrape_lever(slug, limit=limit_per_company))
+        time.sleep(random.uniform(0.5, 1.0))
+    return hasil
+
+
+# ==========================================
 # SCRAPER: KALIBRR.ID (HTML) — ditambahkan warm-up + retry
 # ==========================================
 KALIBRR_BASE = "https://www.kalibrr.id"
@@ -852,57 +1183,77 @@ def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", 
 # ==========================================
 # SCRAPER: LINKEDIN (guest API HTML) — ditambahkan warm-up + retry
 # ==========================================
-def scrape_linkedin(keyword: str = "software engineer", location: str = "Indonesia", limit: int = 10) -> list[dict]:
+def scrape_linkedin(keyword: str = "software engineer", location: str = "Indonesia", limit: int = 25) -> list[dict]:
+    """
+    Guest API LinkedIn hanya mengembalikan ~10 kartu per halaman (parameter
+    `start`), makanya versi lama selalu mentok sekitar 5-10 walau `limit`
+    dinaikkan — itu bukan soal selector, tapi karena cuma minta 1 halaman.
+    Versi ini paginasi (`start=0,10,20,...`) sampai `limit` terpenuhi atau
+    halaman kosong / diblokir.
+    """
     log.info("Mencari lowongan di LinkedIn...")
     hasil = []
-
-    search_url = (
-        "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
-        f"?keywords={keyword.replace(' ', '%20')}&location={location.replace(' ', '%20')}&start=0"
-    )
 
     impersonate = _random_impersonate()
     session = _warm_up_session("https://www.linkedin.com/jobs", impersonate)
 
-    try:
-        resp = _request_with_retry(session, "GET", search_url)
-        resp.raise_for_status()
-    except Exception as e:
-        log.error("❌ Gagal fetch LinkedIn: %s", e)
-        return hasil
+    start = 0
+    halaman_kosong_berturut = 0
+    while len(hasil) < limit and halaman_kosong_berturut < 2:
+        search_url = (
+            "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
+            f"?keywords={keyword.replace(' ', '%20')}&location={location.replace(' ', '%20')}&start={start}"
+        )
+        try:
+            resp = _request_with_retry(session, "GET", search_url, max_retries=2)
+            resp.raise_for_status()
+        except Exception as e:
+            log.error("❌ Gagal fetch LinkedIn (start=%d): %s", start, e)
+            break
 
-    soup = BeautifulSoup(resp.text, "html.parser")
-    cards = soup.select("div.base-card")[:limit]
+        soup = BeautifulSoup(resp.text, "html.parser")
+        cards = soup.select("div.base-card")
 
-    if not cards:
-        log.warning("⚠️ 0 job card LinkedIn ditemukan — struktur mungkin berubah atau diblokir.")
-        return hasil
-
-    for card in cards:
-        judul = _text_or_none(card.select_one("h3.base-search-card__title"))
-        if not judul:
+        if not cards:
+            halaman_kosong_berturut += 1
+            start += 10
             continue
+        halaman_kosong_berturut = 0
 
-        perusahaan = _text_or_none(card.select_one("h4.base-search-card__subtitle")) or "Tidak diketahui"
-        lokasi = _text_or_none(card.select_one("span.job-search-card__location")) or location
+        for card in cards:
+            judul = _text_or_none(card.select_one("h3.base-search-card__title"))
+            if not judul:
+                continue
 
-        link_el = card.select_one("a.base-card__full-link")
-        url_lowongan = link_el.get("href").split("?")[0] if link_el and link_el.get("href") else None
+            perusahaan = _text_or_none(card.select_one("h4.base-search-card__subtitle")) or "Tidak diketahui"
+            lokasi = _text_or_none(card.select_one("span.job-search-card__location")) or location
 
-        hasil.append({
-            "judul": judul,
-            "perusahaan": perusahaan,
-            "lokasi": lokasi,
-            "tipe_kerja": "unknown",
-            "kategori": None,
-            "deskripsi": "",
-            "gaji": None,
-            "sumber_platform": "linkedin",
-            "sumber_url": url_lowongan,
-            "tanggal_post": date.today().isoformat(),
-        })
+            link_el = card.select_one("a.base-card__full-link")
+            url_lowongan = link_el.get("href").split("?")[0] if link_el and link_el.get("href") else None
 
-    return hasil
+            hasil.append({
+                "judul": judul,
+                "perusahaan": perusahaan,
+                "lokasi": lokasi,
+                "tipe_kerja": "unknown",
+                "kategori": None,
+                "deskripsi": "",
+                "gaji": None,
+                "sumber_platform": "linkedin",
+                "sumber_url": url_lowongan,
+                "tanggal_post": date.today().isoformat(),
+            })
+
+            if len(hasil) >= limit:
+                break
+
+        start += 10
+        time.sleep(random.uniform(0.8, 1.6))  # jeda antar-halaman biar sopan
+
+    if not hasil:
+        log.warning("⚠️ 0 job card LinkedIn ditemukan — struktur mungkin berubah atau diblokir.")
+
+    return hasil[:limit]
 
 
 # ==========================================
@@ -1014,7 +1365,20 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
 # ==========================================
 # AGGREGATOR UTAMA
 # ==========================================
-def scrape_semua_sumber(limit_per_sumber: int = 5, keyword_linkedin: str = "software engineer") -> list[dict]:
+def scrape_semua_sumber(
+    limit_per_sumber: int = 5,
+    keyword_linkedin: str = "software engineer",
+    limits: dict | None = None,
+    sertakan_ats: bool = True,
+) -> list[dict]:
+    """
+    `limits`: override limit per sumber, mis. {"linkedin": 30, "remotive": 15}.
+    Sumber yang tidak disebut memakai `limit_per_sumber`. LinkedIn & sumber
+    remote diberi default lebih tinggi karena tidak terlalu rawan diblokir
+    dan justru butuh limit besar untuk kelihatan hasilnya (LinkedIn perlu
+    paginasi untuk itu, sudah ditangani di scrape_linkedin).
+    """
+    limits = limits or {}
     semua_lowongan = []
 
     def safe_extend(scraper_fn, *args, **kwargs):
@@ -1025,31 +1389,50 @@ def scrape_semua_sumber(limit_per_sumber: int = 5, keyword_linkedin: str = "soft
         except Exception as e:
             log.error("❌ Error di %s: %s", scraper_fn.__name__, e)
 
-    safe_extend(scrape_karir_com, limit=limit_per_sumber)
+    # --- sumber lowongan Indonesia ---
+    safe_extend(scrape_karir_com, limit=limits.get("karir.com", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_glints, keyword="", limit=limit_per_sumber)
+    safe_extend(scrape_glints, keyword="", limit=limits.get("glints", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_jobstreet, keyword=keyword_linkedin, limit=limit_per_sumber)
+    safe_extend(scrape_jobstreet, keyword=keyword_linkedin, limit=limits.get("jobstreet", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_linkedin, keyword=keyword_linkedin, limit=limit_per_sumber)
+    safe_extend(scrape_linkedin, keyword=keyword_linkedin, limit=limits.get("linkedin", max(limit_per_sumber, 25)))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_kalibrr, limit=limit_per_sumber)
+    safe_extend(scrape_kalibrr, limit=limits.get("kalibrr", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_dealls, limit=limit_per_sumber)
+    safe_extend(scrape_dealls, limit=limits.get("dealls", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_talentics, limit=limit_per_sumber)
+    safe_extend(scrape_talentics, limit=limits.get("talentics", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_remoteok, limit=limit_per_sumber)
+    # --- sumber remote / internasional ---
+    safe_extend(scrape_remoteok, limit=limits.get("remoteok", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_arbeitnow, limit=limit_per_sumber)
+    safe_extend(scrape_arbeitnow, limit=limits.get("arbeitnow", limit_per_sumber))
+    time.sleep(random.uniform(0.8, 1.5))
+
+    safe_extend(scrape_remotive, limit=limits.get("remotive", limit_per_sumber))
+    time.sleep(random.uniform(0.8, 1.5))
+
+    safe_extend(scrape_jobicy, limit=limits.get("jobicy", limit_per_sumber))
+    time.sleep(random.uniform(0.8, 1.5))
+
+    safe_extend(scrape_himalayas, limit=limits.get("himalayas", limit_per_sumber))
+    time.sleep(random.uniform(0.8, 1.5))
+
+    safe_extend(scrape_weworkremotely, limit=limits.get("weworkremotely", limit_per_sumber))
+    time.sleep(random.uniform(0.8, 1.5))
+
+    # --- langsung dari careers page company (Greenhouse/Lever) ---
+    if sertakan_ats and (GREENHOUSE_BOARD_TOKENS or LEVER_COMPANY_SLUGS):
+        safe_extend(scrape_semua_ats, limit_per_company=limits.get("ats_per_company", 20))
 
     sebelum = len(semua_lowongan)
     semua_lowongan = dedup_lowongan(semua_lowongan)
