@@ -104,11 +104,20 @@ GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
 
 GLINTS_HEADERS = {
     "Accept": "*/*",
+    "Accept-Language": "id",
     "Content-Type": "application/json",
     "Origin": "https://glints.com",
-    "Referer": "https://glints.com/id/opportunities/jobs/explore",
+    "Referer": "https://glints.com/id/opportunities/jobs/explore?country=ID&locationName=All%20Cities%2FProvinces",
     "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/150.0.0.0 Safari/537.36",
-    "x-glints-country-code": "ID", 
+    "x-glints-country-code": "ID",
+    "sec-ch-ua": '"Not;A=Brand";v="8", "Chromium";v="150", "Google Chrome";v="150"',
+    "sec-ch-ua-mobile": "?0",
+    "sec-ch-ua-platform": '"Windows"',
+    "sec-fetch-dest": "empty",
+    "sec-fetch-mode": "cors",
+    "sec-fetch-site": "same-origin",
+    # INI BAGIAN PALING PENTING (Salinan dari -b atau Cookie di curl Anda)
+    "Cookie": 'device_id=c51f7472-77c9-4ab9-9054-db56dceb1afb; glints_tracking_id=043e7f36-ff63-4dee-a6aa-98617331d53a; _gcl_au=1.1.908327477.1784602947; sessionFirstTouchPath=/id/opportunities/jobs/explore; sessionLastTouchPath=/id/opportunities/jobs/explore; currentJobID=064d973c-5732-4643-b903-ef65ae3c6d8b; sessionIsLastTouch=false;'
 }
 
 GRAPHQL_QUERY = """
