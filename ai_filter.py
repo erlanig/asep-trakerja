@@ -16,57 +16,63 @@ client = OpenAI(api_key=os.getenv("OPENAI_API_KEY"))
 MODEL = os.getenv("OPENAI_MODEL", "gpt-4o-mini")
 
 
-def bersihkan_dan_rangkum(lowongan_mentah: list[dict], jumlah: int = 10) -> list[dict]:
+def bersihkan_dan_rangkum(
+    lowongan_mentah: list[dict],
+    jumlah: int = 10
+) -> list[dict]:
     """
     Membersihkan data lowongan hasil scraping menggunakan OpenAI.
-
-    Output:
-    - Judul dan deskripsi lebih rapi
-    - Tambahan kategori pekerjaan
-    - Duplikat dibuang
-    - Data valid dipertahankan sebanyak mungkin
     """
 
     if not lowongan_mentah:
         return []
 
-    input_data = json.dumps(lowongan_mentah, ensure_ascii=False)
+    input_data = json.dumps(
+        lowongan_mentah,
+        ensure_ascii=False
+    )
 
     system_prompt = f"""
 Bersihkan data lowongan kerja hasil scraping.
 
 Tugas:
-1. Rapikan judul, perusahaan, lokasi, dan deskripsi.
-2. Tentukan kategori pekerjaan.
-3. Hapus hanya:
-   - judul kosong
-   - perusahaan kosong/tidak jelas
-   - duplikat sama persis
-   - bukan lowongan kerja
+- Rapikan judul, perusahaan, lokasi, dan deskripsi.
+- Tentukan kategori pekerjaan.
+- Hapus hanya data tidak valid:
+  - judul kosong
+  - perusahaan kosong
+  - duplikat sama persis
+  - bukan lowongan kerja
 
-Jangan hapus data hanya karena:
+Jangan hapus karena:
 - gaji kosong
 - lokasi kosong
 - deskripsi kosong
 
-Gunakan null atau "Tidak disebutkan" jika data tidak tersedia.
-Pilih maksimal {jumlah} lowongan terbaik, tetapi pertahankan sebanyak mungkin data valid.
+Jika data kosong gunakan null atau "Tidak disebutkan".
 
-Output JSON array saja tanpa markdown.
+Ambil maksimal {jumlah} lowongan terbaik.
+Pertahankan sebanyak mungkin data valid.
 
-Field wajib:
-judul, perusahaan, lokasi, tipe_kerja, kategori,
-deskripsi, gaji, sumber_platform,
-sumber_url, tanggal_post
+Output JSON object:
+{{"lowongan":[...]}}
 
-Kategori contoh:
-IT & Software, Marketing, Finance & Accounting,
-Customer Service, Human Resources, Sales,
-Operations, Design, Lainnya
+Setiap item wajib memiliki:
+judul, perusahaan, lokasi, tipe_kerja,
+kategori, deskripsi, gaji,
+sumber_platform, sumber_url, tanggal_post
 
-tipe_kerja hanya:
-full-time, part-time, remote, kontrak, magang.
+Kategori:
+IT & Software, Marketing,
+Finance & Accounting, Customer Service,
+Human Resources, Sales, Operations,
+Design, Lainnya
+
+tipe_kerja:
+full-time, part-time, remote, kontrak, magang
 """
+
+    response = None
 
     try:
         response = client.chat.completions.create(
@@ -91,11 +97,11 @@ full-time, part-time, remote, kontrak, magang.
 
         hasil = json.loads(hasil_teks)
 
-        # Handle jika AI membungkus response
+        # Format JSON object {"lowongan":[]}
         if isinstance(hasil, dict):
             hasil = (
-                hasil.get("data")
-                or hasil.get("lowongan")
+                hasil.get("lowongan")
+                or hasil.get("data")
                 or hasil.get("jobs")
                 or []
             )
@@ -107,9 +113,20 @@ full-time, part-time, remote, kontrak, magang.
 
     except json.JSONDecodeError as e:
         print(f"❌ JSON OpenAI tidak valid: {e}")
-        print(response.choices[0].message.content[:500])
+
+        if response:
+            print(
+                response.choices[0]
+                .message.content[:500]
+            )
+
         return []
 
     except Exception as e:
         print(f"❌ Error OpenAI: {e}")
         return []
+
+
+# Alias agar script lama tetap berjalan
+# main.py yang memanggil filter_dan_rangkum tidak perlu diubah
+filter_dan_rangkum = bersihkan_dan_rangkum
