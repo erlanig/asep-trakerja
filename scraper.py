@@ -101,7 +101,7 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 
 
 # ==========================================
-# SCRAPER: GLINTS.COM (API)
+# SCRAPER: GLINTS.COM (API) – DIPERBAIKI GAJI & 403
 # ==========================================
 GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
 
@@ -111,6 +111,7 @@ GLINTS_HEADERS = {
     "Origin": "https://glints.com",
     "Referer": "https://glints.com/id/opportunities/jobs/explore",
     "x-glints-country-code": "ID",
+    "User-Agent": "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 (KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36",
 }
 
 GRAPHQL_QUERY = """
@@ -134,16 +135,39 @@ query searchJobsV3($data: JobSearchConditionInput!) {
 }
 """
 
-def _format_gaji_glints(salaries: list) -> str | None:
-    if not salaries:
-        return None
-    gaji = salaries[0]
-    min_amt = gaji.get("minAmount")
-    max_amt = gaji.get("maxAmount")
-    currency = gaji.get("CurrencyCode", "IDR")
+def _format_gaji_glints(job_item: dict) -> str | None:
+    """
+    Ambil informasi gaji dari objek job Glints, dengan fallback beberapa struktur.
+    """
+    salaries = job_item.get("salaries", [])
+    
+    # Coba dari array salaries[0]
+    if salaries and isinstance(salaries, list) and len(salaries) > 0:
+        gaji_obj = salaries[0]
+        if isinstance(gaji_obj, dict):
+            min_amt = gaji_obj.get("minAmount")
+            max_amt = gaji_obj.get("maxAmount")
+            currency = gaji_obj.get("CurrencyCode") or gaji_obj.get("currencyCode") or "IDR"
+            if min_amt and max_amt:
+                return f"{currency} {min_amt:,.0f} - {max_amt:,.0f}".replace(",", ".")
+            elif max_amt:
+                return f"Hingga {currency} {max_amt:,.0f}".replace(",", ".")
+            elif min_amt:
+                return f"Dari {currency} {min_amt:,.0f}".replace(",", ".")
+            # field 'amount' tunggal
+            if gaji_obj.get("amount"):
+                return f"{currency} {gaji_obj['amount']:,.0f}".replace(",", ".")
 
-    if min_amt and max_amt:
-        return f"{currency} {min_amt:,.0f} - {max_amt:,.0f}".replace(",", ".")
+    # Fallback ke field langsung di job (salaryMin, salaryMax)
+    min_salary = job_item.get("salaryMin")
+    max_salary = job_item.get("salaryMax")
+    if min_salary and max_salary:
+        return f"IDR {min_salary:,.0f} - {max_salary:,.0f}".replace(",", ".")
+    elif max_salary:
+        return f"Hingga IDR {max_salary:,.0f}".replace(",", ".")
+    elif min_salary:
+        return f"Dari IDR {min_salary:,.0f}".replace(",", ".")
+
     return None
 
 def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list[dict]:
@@ -166,12 +190,16 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
         "query": GRAPHQL_QUERY
     }
 
-    session = requests.Session(impersonate="chrome120")
-
+    session = requests.Session()
+    # gunakan impersonate dengan versi lebih baru
+    session.headers.update(GLINTS_HEADERS)
     try:
-        session.get("https://glints.com/id/opportunities/jobs/explore", timeout=15)
+        # kunjungi homepage dulu
+        session.get("https://glints.com/id/opportunities/jobs/explore",
+                    timeout=15, impersonate="chrome124")
         time.sleep(1)
-        resp = session.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload, timeout=15)
+        resp = session.post(GLINTS_API_URL, headers=GLINTS_HEADERS, json=payload,
+                            timeout=15, impersonate="chrome124")
         resp.raise_for_status()
         data = resp.json()
     except Exception as e:
@@ -196,7 +224,7 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
             "tipe_kerja": item.get("type", "").lower(),
             "kategori": None,
             "deskripsi": "",
-            "gaji": _format_gaji_glints(item.get("salaries", [])),
+            "gaji": _format_gaji_glints(item),   # <-- kirim objek utuh
             "sumber_platform": "glints",
             "sumber_url": f"https://glints.com/id/opportunities/jobs/{job_id}",
             "tanggal_post": _parse_iso_date(item.get("updatedAt") or item.get("createdAt")),
@@ -208,30 +236,13 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
 # ==========================================
 # LAPIS HTML/CSS SELECTOR — untuk situs tanpa API publik
 # ==========================================
-# Dipakai untuk LinkedIn, Kalibrr, dan situs sejenis yang lebih mudah/stabil
-# di-scrape lewat HTML + CSS selector daripada lewat API tersembunyi.
-#
-# CATATAN LINKEDIN:
-# LinkedIn punya endpoint publik (tanpa login) yang dipakai halaman "guest" job search,
-# mengembalikan potongan HTML berisi daftar lowongan. Selector di bawah adalah pola umum
-# yang dipakai halaman tersebut, tapi bisa berubah sewaktu-waktu tanpa pemberitahuan,
-# dan LinkedIn membatasi rate/kadang memblokir IP yang scraping terlalu sering — jadi
-# pakai time.sleep() antar request dan jangan set limit terlalu besar. ToS LinkedIn juga
-# secara eksplisit melarang scraping otomatis, jadi ini murni "bisa secara teknis",
-# risiko pemblokiran akun/IP tetap ada.
-#
-# CATATAN KALIBRR:
-# Selector di bawah masih PLACEHOLDER karena saya tidak punya akses jaringan ke
-# kalibrr.com dari sandbox ini. Isi sendiri lewat debug_page_structure() di bagian
-# paling bawah file ini (Inspect Element di browser Anda), lalu update dictionary ini.
-
 SITE_CONFIGS = {
     "linkedin": {
         "search_url": (
             "https://www.linkedin.com/jobs-guest/jobs/api/seeMoreJobPostings/search"
             "?keywords={keyword}&location={location}&start={start}"
         ),
-        "impersonate": "chrome120",
+        "impersonate": "chrome124",
         "needs_browser": False,
         "selector_job_card": "div.base-card",
         "selector_title": "h3.base-search-card__title",
@@ -240,14 +251,61 @@ SITE_CONFIGS = {
         "selector_link": "a.base-card__full-link",
         "link_prefix": "",
     },
+    # Jobstreet – contoh config, perlu penyesuaian selector aktual
+    "jobstreet": {
+        "search_url": "https://www.jobstreet.co.id/id/job-search/{keyword}-jobs/",
+        "impersonate": "chrome124",
+        "needs_browser": False,
+        "selector_job_card": "div[data-automation='jobCard']",
+        "selector_title": "h1 a",
+        "selector_company": "span[data-automation='jobCompany']",
+        "selector_location": "span[data-automation='jobLocation']",
+        "selector_link": "a[data-automation='jobTitle']",
+        "link_prefix": "https://www.jobstreet.co.id",
+    },
+    # Indeed – contoh config
+    "indeed": {
+        "search_url": "https://id.indeed.com/jobs?q={keyword}&l={location}",
+        "impersonate": "chrome124",
+        "needs_browser": True,   # sering perlu render JS
+        "selector_job_card": "div.job_seen_beacon",
+        "selector_title": "h2.jobTitle a",
+        "selector_company": "span.companyName",
+        "selector_location": "div.companyLocation",
+        "selector_link": "h2.jobTitle a",
+        "link_prefix": "https://id.indeed.com",
+    },
+    # Talentics – asumsi halaman karir publik
+    "talentics": {
+        "search_url": "https://talentics.id/careers",   # ganti dengan URL yang benar
+        "impersonate": "chrome124",
+        "needs_browser": False,
+        "selector_job_card": "div.career-item",         # placeholder, sesuaikan
+        "selector_title": "h3",
+        "selector_company": None,                       # perusahaan tetap Talentics
+        "selector_location": "span.location",
+        "selector_link": "a",
+        "link_prefix": "https://talentics.id",
+    },
 }
 
 # ==========================================
-# SCRAPER: KALIBRR.ID (HTML, pola URL job — bukan CSS class)
+# SCRAPER: KALIBRR.ID (HTML) – PERBAIKAN GAJI
 # ==========================================
 KALIBRR_BASE = "https://www.kalibrr.id"
 KALIBRR_JOB_LINK_RE = re.compile(r'^(/c/[^/]+/jobs/(\d+)/[^?]+)$')
 
+def _parse_gaji_kalibrr(text: str) -> str | None:
+    """Ambil gaji dari teks dengan berbagai format."""
+    # Format "IDR 5.000.000 - 10.000.000 / month"
+    match = re.search(r'(IDR\s?[\d.,]+\s*-\s*IDR\s?[\d.,]+\s*/?\s*month)', text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    # Format "IDR 10.000.000 / month" (hanya satu angka)
+    match = re.search(r'(IDR\s?[\d.,]+\s*/?\s*month)', text, re.IGNORECASE)
+    if match:
+        return match.group(1).strip()
+    return None
 
 def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
     print("Mencari lowongan di Kalibrr...")
@@ -255,7 +313,7 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
     url = f"{KALIBRR_BASE}{path}"
 
     try:
-        resp = requests.get(url, impersonate="chrome120", timeout=15)
+        resp = requests.get(url, impersonate="chrome124", timeout=15)
         resp.raise_for_status()
     except Exception as e:
         print(f"❌ Gagal fetch Kalibrr: {e}")
@@ -285,7 +343,6 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
             continue
         seen_ids.add(job_id)
 
-        # Nama perusahaan: anchor berikutnya setelah link judul biasanya link nama perusahaan
         perusahaan = "Tidak diketahui"
         next_a = a.find_next("a", href=True)
         if next_a:
@@ -293,7 +350,7 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
             if teks:
                 perusahaan = teks
 
-        # Ambil teks blok sekitar untuk cari lokasi/gaji/tipe secara heuristik.
+        # Ambil teks kartu
         container = a
         card_text = ""
         for _ in range(6):
@@ -307,8 +364,7 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
         lokasi_match = re.search(r'([A-Za-zÀ-ÿ .\'-]+,\s*Indonesia)', card_text)
         lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
 
-        gaji_match = re.search(r'(IDR[\d.,]+\s*-\s*IDR[\d.,]+\s*/\s*month)', card_text)
-        gaji = gaji_match.group(1) if gaji_match else None
+        gaji = _parse_gaji_kalibrr(card_text)
 
         if "FULL_TIME" in card_text:
             tipe = "full-time"
@@ -343,11 +399,22 @@ def scrape_kalibrr(path: str = "/home/all-jobs", limit: int = 10) -> list[dict]:
 
 
 # ==========================================
-# SCRAPER: DEALLS.COM (HTML, pola URL job)
+# SCRAPER: DEALLS.COM (HTML) – PERBAIKAN GAJI
 # ==========================================
 DEALLS_BASE = "https://dealls.com"
 DEALLS_JOB_LINK_RE = re.compile(r'^(/loker/([a-z0-9-]+)~([a-z0-9-]+))$')
 
+def _parse_gaji_dealls(text: str) -> str | None:
+    """Ambil gaji dari teks Dealls."""
+    # Format "Rp 5.000.000 - Rp 10.000.000"
+    match = re.search(r'(Rp\s?[\d.,]+\s*-\s*Rp\s?[\d.,]+)', text)
+    if match:
+        return match.group(1).strip()
+    # Format "Rp 10.000.000" (tunggal)
+    match = re.search(r'(Rp\s?[\d.,]+)', text)
+    if match and "Negotiable" not in text:
+        return match.group(1).strip()
+    return None
 
 def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", limit: int = 10) -> list[dict]:
     print("Mencari lowongan di Dealls...")
@@ -355,7 +422,7 @@ def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", 
     url = f"{DEALLS_BASE}{path}"
 
     try:
-        resp = requests.get(url, impersonate="chrome120", timeout=15)
+        resp = requests.get(url, impersonate="chrome124", timeout=15)
         resp.raise_for_status()
     except Exception as e:
         print(f"❌ Gagal fetch Dealls: {e}")
@@ -396,8 +463,7 @@ def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", 
         lokasi_match = re.search(r'•\s*([A-Za-zÀ-ÿ .\'-]+?)(?:Min\.|Rp|Negotiable|$)', full_text)
         lokasi = lokasi_match.group(1).strip() if lokasi_match else "Indonesia"
 
-        gaji_match = re.search(r'(Rp\s?[\d.,]+\s*-\s*Rp\s?[\d.,]+)', full_text)
-        gaji = gaji_match.group(1) if gaji_match else (None if "Negotiable" not in full_text else None)
+        gaji = _parse_gaji_dealls(full_text)
 
         hasil.append({
             "judul": slug_judul,
@@ -427,11 +493,6 @@ def scrape_dealls(path: str = "/loker/populer/loker-software-engineer-jakarta", 
 # ==========================================
 def scrape_linkedin(keyword: str = "software engineer", location: str = "Indonesia",
                      limit: int = 10) -> list[dict]:
-    """
-    Scrape LinkedIn lewat endpoint publik "guest" (tanpa login) yang dipakai
-    halaman pencarian lowongan versi non-login. Mengembalikan potongan HTML
-    yang di-parse dengan CSS selector.
-    """
     print("Mencari lowongan di LinkedIn...")
     hasil = []
     cfg = SITE_CONFIGS["linkedin"]
@@ -485,18 +546,76 @@ def scrape_linkedin(keyword: str = "software engineer", location: str = "Indones
 
 
 # ==========================================
-# GENERIC HTML / PLAYWRIGHT SCRAPER
+# SCRAPER TAMBAHAN: TALENTICS (HTML generik)
 # ==========================================
-def generic_html_scraper(site_key: str, limit: int = 10) -> list[dict]:
+def scrape_talentics(limit: int = 10) -> list[dict]:
+    """
+    Scrape lowongan dari halaman karir Talentics.
+    Konfigurasi selector ada di SITE_CONFIGS['talentics'].
+    """
+    cfg = SITE_CONFIGS.get("talentics")
+    if not cfg:
+        print("⚠️ Konfigurasi Talentics belum ada.")
+        return []
+    print("Mencari lowongan di Talentics...")
+    hasil = []
+
+    try:
+        resp = requests.get(cfg["search_url"], impersonate=cfg.get("impersonate", "chrome124"), timeout=15)
+        resp.raise_for_status()
+    except Exception as e:
+        print(f"❌ Gagal fetch Talentics: {e}")
+        return hasil
+
+    soup = BeautifulSoup(resp.text, "html.parser")
+    cards = soup.select(cfg["selector_job_card"])[:limit]
+
+    if not cards:
+        print("⚠️ 0 lowongan Talentics ditemukan. Mungkin selector perlu disesuaikan. "
+              "Jalankan debug_page_structure() untuk inspeksi halaman.")
+        return hasil
+
+    for card in cards:
+        judul = _text_or_none(card.select_one(cfg["selector_title"]))
+        if not judul:
+            continue
+        perusahaan = "Talentics"
+        lokasi = _text_or_none(card.select_one(cfg["selector_location"])) or ""
+
+        link_el = card.select_one(cfg["selector_link"])
+        href = link_el.get("href") if link_el else None
+        url_lengkap = (cfg.get("link_prefix", "") + href) if href and href.startswith("/") else href
+
+        hasil.append({
+            "judul": judul,
+            "perusahaan": perusahaan,
+            "lokasi": lokasi,
+            "tipe_kerja": "unknown",
+            "kategori": None,
+            "deskripsi": "",
+            "gaji": None,
+            "sumber_platform": "talentics",
+            "sumber_url": url_lengkap or cfg["search_url"],
+            "tanggal_post": date.today().isoformat(),
+        })
+
+    return hasil
+
+
+# ==========================================
+# SCRAPER GENERIK UNTUK SITUS LAIN (Jobstreet, Indeed, dll)
+# ==========================================
+def generic_html_scraper(site_key: str, limit: int = 10, **format_kwargs) -> list[dict]:
     cfg = SITE_CONFIGS.get(site_key)
     if not cfg:
         raise ValueError(f"Config untuk '{site_key}' belum ada di SITE_CONFIGS")
 
     print(f"Mencari lowongan di {site_key} (HTML scraping)...")
     hasil = []
+    search_url = cfg["search_url"].format(**format_kwargs) if format_kwargs else cfg["search_url"]
 
     try:
-        resp = requests.get(cfg["search_url"], impersonate=cfg.get("impersonate", "chrome120"), timeout=15)
+        resp = requests.get(search_url, impersonate=cfg.get("impersonate", "chrome124"), timeout=15)
         resp.raise_for_status()
     except Exception as e:
         print(f"❌ Gagal fetch halaman {site_key}: {e}")
@@ -538,7 +657,7 @@ def generic_html_scraper(site_key: str, limit: int = 10) -> list[dict]:
     return hasil
 
 
-def generic_playwright_scraper(site_key: str, limit: int = 10, wait_selector: str | None = None) -> list[dict]:
+def generic_playwright_scraper(site_key: str, limit: int = 10, wait_selector: str | None = None, **format_kwargs) -> list[dict]:
     from playwright.sync_api import sync_playwright
 
     cfg = SITE_CONFIGS.get(site_key)
@@ -547,12 +666,13 @@ def generic_playwright_scraper(site_key: str, limit: int = 10, wait_selector: st
 
     print(f"Mencari lowongan di {site_key} (Playwright/browser render)...")
     hasil = []
+    search_url = cfg["search_url"].format(**format_kwargs) if format_kwargs else cfg["search_url"]
 
     with sync_playwright() as p:
         browser = p.chromium.launch(headless=True)
         page = browser.new_page()
         try:
-            page.goto(cfg["search_url"], timeout=30000)
+            page.goto(search_url, timeout=30000)
             page.wait_for_selector(wait_selector or cfg["selector_job_card"], timeout=15000)
             html = page.content()
         except Exception as e:
@@ -601,7 +721,7 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
             html = page.content()
             browser.close()
     else:
-        resp = requests.get(url, impersonate="chrome120", timeout=15)
+        resp = requests.get(url, impersonate="chrome124", timeout=15)
         html = resp.text
 
     with open(save_to, "w", encoding="utf-8") as f:
@@ -614,21 +734,39 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
 
 
 # ==========================================
-# AGGREGATOR UTAMA
+# AGGREGATOR UTAMA (DITAMBAH SEMUA SUMBER)
 # ==========================================
 def scrape_semua_sumber(limit_per_sumber: int = 5, keyword_linkedin: str = "software engineer") -> list[dict]:
     semua_lowongan = []
 
+    # Sumber API
     semua_lowongan.extend(scrape_karir_com(limit=limit_per_sumber))
     time.sleep(1)
 
     semua_lowongan.extend(scrape_glints(page_size=limit_per_sumber))
     time.sleep(1)
 
+    # LinkedIn
     semua_lowongan.extend(scrape_linkedin(keyword=keyword_linkedin, limit=limit_per_sumber))
     time.sleep(1)
 
+    # Kalibrr
     semua_lowongan.extend(scrape_kalibrr(limit=limit_per_sumber))
+    time.sleep(1)
+
+    # Dealls
+    semua_lowongan.extend(scrape_dealls(limit=limit_per_sumber))
+    time.sleep(1)
+
+    # Talentics
+    semua_lowongan.extend(scrape_talentics(limit=limit_per_sumber))
+    time.sleep(1)
+
+    # Jobstreet & Indeed contoh (aktifkan sesuai kebutuhan, sesuaikan keyword)
+    # semua_lowongan.extend(generic_html_scraper("jobstreet", limit=limit_per_sumber, keyword="software engineer"))
+    # time.sleep(2)
+    # semua_lowongan.extend(generic_playwright_scraper("indeed", limit=limit_per_sumber, keyword="software engineer", location="Indonesia"))
+    # time.sleep(2)
 
     return semua_lowongan
 
