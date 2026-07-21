@@ -104,9 +104,10 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 # SCRAPER: GLINTS.COM
 # ==========================================
 GLINTS_API_URL = "https://glints.com/api/v2-alc/graphql"
+
+# Generate device_id palsu agar Glints mengira ini sesi user baru
 dummy_device_id = str(uuid.uuid4())
 
-# Header lebih bersih karena curl_cffi otomatis mengurus fingerprint browser
 GLINTS_HEADERS = {
     "Accept": "*/*",
     "Accept-Language": "id,en-US;q=0.9,en;q=0.8",
@@ -213,7 +214,6 @@ def scrape_glints(keyword: str = "", page: int = 1, page_size: int = 10) -> list
         })
 
     return hasil
-
 
 # ==========================================
 # AGGREGATOR UTAMA
