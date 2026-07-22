@@ -6,74 +6,42 @@ Perubahan utama dari versi sebelumnya:
 1. `_get_session()` / `_request_with_retry()` — helper request terpusat dengan:
    - rotasi User-Agent & profil impersonate (biar tidak selalu sama pola-nya)
    - "cookie warm-up" (kunjungi homepage dulu sebelum halaman pencarian) —
-     ini yang memperbaiki 403 di Glints, karena Cloudflare/WAF Glints menolak
-     request yang langsung "dingin" tanpa cookie sesi.
+     membantu mengurangi 403 di beberapa situs yang menolak request
+     "dingin" tanpa cookie sesi.
    - retry otomatis dengan exponential backoff + jitter untuk 403/429/5xx
    - header browser yang lebih lengkap (sec-ch-ua, sec-fetch-*, dll)
 
-2. Glints diperbaiki dengan selector HTML yang lebih tahan terhadap perubahan
-   struktur (mencari lewat beberapa kandidat selector, bukan cuma satu),
-   plus fallback ke Playwright (kalau terpasang) untuk kasus di mana
-   Cloudflare butuh render JS penuh.
-
-3. Sumber baru ditambahkan (semuanya API publik resmi milik platform,
-   jadi jauh lebih stabil daripada HTML scraping):
-   - JobStreet Indonesia (chalice-search API, dipakai oleh seluruh
-     jaringan SEEK termasuk Jobstreet ID)
+2. Sumber API publik resmi (jauh lebih stabil daripada HTML scraping):
    - RemoteOK (API JSON publik)
    - Arbeitnow (API JSON publik, job internasional termasuk remote)
 
-4. Deduplikasi lintas-sumber berdasarkan (judul + perusahaan) yang
+3. Deduplikasi lintas-sumber berdasarkan (judul + perusahaan) yang
    dinormalisasi, supaya lowongan yang sama dari 2 sumber tidak dobel.
 
-5. Logging pakai modul `logging` (bukan print polos) supaya gampang
+4. Logging pakai modul `logging` (bukan print polos) supaya gampang
    dipantau saat dijalankan sebagai cron/service, tapi tetap tampil di
    console seperti sebelumnya.
 
-CATATAN PENTING soal Glints & JobStreet (kalau masih 403 terus-menerus):
-Kalau warm-up + retry + header lengkap MASIH kena 403 terus-menerus di
-kedua situs ini, penyebabnya kemungkinan besar BUKAN lagi soal cookie
-atau header — kemungkinan besar IP server tempat kode ini dijalankan
-(VPS, cloud compute, sandbox) sudah masuk daftar blokir Cloudflare/WAF
-di level jaringan (banyak platform besar blok seluruh range IP
-datacenter/cloud, terlepas dari header apa pun yang dikirim). Ini bukan
-sesuatu yang bisa diperbaiki lewat kode saja. Opsi realistis:
-  a) jalankan dari IP residensial (laptop/rumah) untuk tes — kalau di
-     laptop berhasil tapi di server tidak, itu konfirmasi block di level IP.
-  b) pasang Playwright (`pip install playwright && playwright install chromium`)
-     — otomatis dipakai sebagai fallback untuk Glints kalau tersedia, tapi
-     kalau block-nya di level IP, Playwright pun tidak akan menembus.
-  c) pakai residential/mobile proxy, atau layanan scraping pihak ketiga
-     yang rotasi IP otomatis.
-Karena dua sumber ini rawan diblokir di level infrastruktur, versi ini
-menambah banyak sumber API publik lain (lihat di bawah) yang jauh lebih
-stabil dijalankan dari server/cloud.
-
-6. Sumber tambahan (update kedua) — API/RSS publik yang tidak dilindungi
-   Cloudflare-tier WAF seperti Glints/JobStreet:
+5. Sumber tambahan — API/RSS publik:
    - Remotive, Jobicy, Himalayas — API JSON remote-job publik
    - We Work Remotely — RSS feed publik
    - Greenhouse & Lever — API job-board publik yang dipakai banyak startup
      untuk menampilkan lowongan mereka sendiri di careers page (generic
      scraper — tinggal isi daftar company slug/board token untuk "tembus"
-     langsung ke web company masing-masing, sesuai permintaan awal)
+     langsung ke web company masing-masing)
 
-7. LinkedIn sekarang paginasi (bukan cuma ~10 kartu di 1 halaman) dan
-   punya limit independen dari `limit_per_sumber`, karena sebelumnya
-   hasilnya selalu mentok di angka kecil walau limit dinaikkan.
+6. LinkedIn paginasi (bukan cuma ~10 kartu di 1 halaman) dan
+   punya limit independen dari `limit_per_sumber`.
 
-8. (Update ketiga) Dealls diperbaiki + sumber baru "ala Indeed":
-   - Dealls: URL situsnya sekarang pakai prefix `/en/` (mis.
-     `/en/loker/populer/...`), sementara regex & path lama masih pakai
-     `/loker/...` tanpa `/en/` — ini salah satu sebab hasil sedikit/kosong.
-     Selain itu, tiap halaman kategori Dealls SEKARANG hanya me-render ~2
-     lowongan lewat SSR (sisanya baru muncul lewat infinite-scroll JS di
-     browser asli) — jadi HTML statis memang secara struktural cuma bisa
-     dapat sedikit per URL. Diperbaiki dengan: (a) regex/base URL yang
-     benar, (b) fallback Playwright yang scroll halaman untuk memicu
-     infinite-scroll, (c) daftar path kategori yang jauh lebih banyak
-     (kombinasi peran x kota) supaya total volume tetap besar walau
-     per-halaman kecil.
+7. Dealls diperbaiki + sumber baru "ala Indeed":
+   - Dealls: URL situsnya pakai prefix `/en/` (mis. `/en/loker/populer/...`).
+     Tiap halaman kategori Dealls hanya me-render ~2 lowongan lewat SSR
+     (sisanya baru muncul lewat infinite-scroll JS di browser asli) —
+     jadi HTML statis memang secara struktural cuma bisa dapat sedikit per
+     URL. Diperbaiki dengan: (a) regex/base URL yang benar, (b) fallback
+     Playwright yang scroll halaman untuk memicu infinite-scroll, (c)
+     daftar path kategori LUAS (bukan puluhan kombinasi sempit) supaya
+     total volume tetap besar walau per-halaman kecil.
    - Indeed: TIDAK discrape langsung. Indeed memakai proteksi anti-bot
      kelas berat (Cloudflare/DataDome + interstitial captcha) yang didesain
      khusus menahan scraper headless, dan Term of Service mereka melarang
@@ -84,6 +52,20 @@ stabil dijalankan dari server/cloud.
      juga muncul di Indeed) lewat REST API resmi & gratis (butuh API key,
      daftar di https://jooble.org/api/about) — jauh lebih stabil daripada
      scraping Indeed langsung dan mencakup Indonesia.
+
+CATATAN PENGHAPUSAN SUMBER (penting, baca sebelum menambah balik):
+Glints, JobStreet, dan Talentics (via fallback LinkedIn-nya) SENGAJA
+dihapus dari scraper ini:
+  - Glints: robots.txt Glints secara eksplisit melarang akses otomatis ke
+    path pencarian lowongan (dikonfirmasi lewat fetch langsung, respons
+    ROBOTS_DISALLOWED). Bukan sekadar Cloudflare/IP block teknis yang bisa
+    "diakali" — situsnya sudah menyatakan kebijakan itu secara resmi.
+  - JobStreet (jaringan SEEK) & Talentics: dihapus bersamaan sebagai bagian
+    dari keputusan yang sama untuk tidak menembus proteksi/kebijakan situs
+    yang tidak mengizinkan akses otomatis, konsisten dengan alasan di atas.
+Kalau di masa depan ada kerja sama resmi/API resmi dari platform-platform
+ini, scraper-nya bisa ditambahkan kembali dengan basis yang sah (bukan
+HTML scraping / reverse-engineered API tanpa izin).
 """
 
 from __future__ import annotations
@@ -274,16 +256,15 @@ def _dalam_rentang_hari(tanggal_iso: str | None, hari: int = HARI_RENTANG_DEFAUL
     yang tanggal post-nya persis hari ini.
 
     Catatan soal tanggal tutup/deadline: sebagian besar sumber publik yang
-    dipakai scraper ini (karir.com, Glints, JobStreet, Kalibrr, Dealls,
-    LinkedIn guest API, RemoteOK, Arbeitnow, Remotive, Jobicy, Himalayas,
-    WWR, Greenhouse, Lever, Jooble) TIDAK mengekspos tanggal tutup lowongan
-    di endpoint publik yang dipakai di sini — jadi filter "jangan yang
-    tutup hari ini / minimal H+1" tidak bisa dijamin dari sisi scraping.
-    Sebagai proxy yang realistis, kita pakai rentang tanggal POSTING (30
-    hari terakhir) supaya tidak mengambil lowongan basi yang kemungkinan
-    besar sudah/hampir tutup. Kalau di masa depan sebuah sumber ternyata
-    menyediakan field deadline, tinggal tambahkan pengecekan
-    `deadline >= besok` di sini.
+    dipakai scraper ini (karir.com, Kalibrr, Dealls, LinkedIn guest API,
+    RemoteOK, Arbeitnow, Remotive, Jobicy, Himalayas, WWR, Greenhouse,
+    Lever, Jooble) TIDAK mengekspos tanggal tutup lowongan di endpoint
+    publik yang dipakai di sini — jadi filter "jangan yang tutup hari ini /
+    minimal H+1" tidak bisa dijamin dari sisi scraping. Sebagai proxy yang
+    realistis, kita pakai rentang tanggal POSTING (30 hari terakhir) supaya
+    tidak mengambil lowongan basi yang kemungkinan besar sudah/hampir
+    tutup. Kalau di masa depan sebuah sumber ternyata menyediakan field
+    deadline, tinggal tambahkan pengecekan `deadline >= besok` di sini.
     """
     if not tanggal_iso:
         return True  # tidak ada info tanggal -> jangan buang, biarkan lolos
@@ -380,13 +361,14 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
 
     opportunities = payload.get("data", {}).get("opportunities", [])
 
-    for item in opportunities:
+    for i, item in enumerate(opportunities, 1):
         job_id = item.get("id")
         judul = item.get("job_position")
         if not judul or not job_id:
             continue
 
         perusahaan = item.get("company_name")
+        log.info("  [%d/%d] Fetch detail: %s", i, len(opportunities), judul)
         deskripsi_lengkap = get_job_detail_karir(job_id)
         time.sleep(0.5)
 
@@ -401,279 +383,6 @@ def scrape_karir_com(limit: int = 10, offset: int = 0) -> list[dict]:
             "sumber_platform": "karir.com",
             "sumber_url": KARIR_BASE_JOB_URL.format(id=job_id),
             "tanggal_post": _parse_iso_date(item.get("posted_at")),
-        })
-
-    return hasil
-
-
-# ==========================================
-# SCRAPER: GLINTS.COM (diperbaiki — warm-up + multi-selector + retry)
-# ==========================================
-GLINTS_HOMEPAGE = "https://glints.com/id"
-GLINTS_JOB_LINK_RE = re.compile(r'/opportunities/jobs/([a-zA-Z0-9-]+)')
-
-# Beberapa kandidat class yang pernah dipakai Glints untuk kartu lowongan.
-# Kita coba semua secara berurutan — halaman React sering ganti nama class
-# hash (mis. `sc-abc123`), jadi kita juga fallback ke pencarian generik lewat link.
-GLINTS_CARD_SELECTOR_CANDIDATES = [
-    "div[class*='JobCard']",
-    "div[class*='opportunity-card']",
-    "li[class*='job']",
-]
-
-
-def _extract_glints_card_info(a_tag, soup) -> dict | None:
-    href = a_tag.get("href", "")
-    m = GLINTS_JOB_LINK_RE.search(href)
-    if not m:
-        return None
-    job_id = m.group(1)
-
-    judul = a_tag.get_text(strip=True)
-    if not judul:
-        judul_el = a_tag.find_previous(["h2", "h3"]) or a_tag.find_next(["h2", "h3"])
-        judul = _text_or_none(judul_el)
-    if not judul:
-        return None
-
-    container = a_tag
-    teks_kartu = ""
-    for _ in range(6):
-        container = container.find_parent()
-        if container is None:
-            break
-        teks_kartu = container.get_text(" ", strip=True)
-        if len(teks_kartu) > 50:
-            break
-
-    perusahaan = "Tidak diketahui"
-    company_el = container.find("span", class_=re.compile(r"company", re.I)) if container else None
-    if company_el:
-        perusahaan = _text_or_none(company_el) or perusahaan
-    else:
-        match_company = re.search(r'(?:di|at)\s+([A-Za-z0-9\s&.]+)', teks_kartu)
-        if match_company:
-            perusahaan = match_company.group(1).strip()
-
-    lokasi = "Indonesia"
-    loc_el = container.find("span", class_=re.compile(r"location", re.I)) if container else None
-    if loc_el:
-        lokasi = _text_or_none(loc_el) or lokasi
-    else:
-        cities = ["Jakarta", "Bandung", "Surabaya", "Yogyakarta", "Tangerang", "Bekasi", "Semarang", "Remote"]
-        for city in cities:
-            if city.lower() in teks_kartu.lower():
-                lokasi = city
-                break
-
-    gaji = _parse_gaji_dari_teks(teks_kartu)
-
-    tipe = "unknown"
-    lower_teks = teks_kartu.lower()
-    if any(k in lower_teks for k in ["full-time", "full time", "penuh waktu"]):
-        tipe = "full-time"
-    elif any(k in lower_teks for k in ["part-time", "part time", "paruh waktu"]):
-        tipe = "part-time"
-    elif any(k in lower_teks for k in ["contract", "kontrak"]):
-        tipe = "kontrak"
-    elif "intern" in lower_teks or "magang" in lower_teks:
-        tipe = "magang"
-
-    sumber_url = f"https://glints.com{href}" if href.startswith("/") else href
-
-    return {
-        "judul": judul,
-        "perusahaan": perusahaan,
-        "lokasi": lokasi,
-        "tipe_kerja": tipe,
-        "kategori": None,
-        "deskripsi": "",
-        "gaji": gaji,
-        "sumber_platform": "glints",
-        "sumber_url": sumber_url,
-        "tanggal_post": date.today().isoformat(),
-        "_job_id": job_id,
-    }
-
-
-def _scrape_glints_via_html(keyword: str, location: str, limit: int) -> list[dict]:
-    impersonate = _random_impersonate()
-    session = _warm_up_session(GLINTS_HOMEPAGE, impersonate)
-
-    base_url = "https://glints.com/id/opportunities/jobs/explore"
-    # "All Cities/Provinces" adalah value locationName default yang dipakai
-    # UI Glints sendiri ketika tidak memilih kota spesifik (dikonfirmasi dari
-    # URL asli situsnya) — beda dari "Indonesia" yang dipakai versi lama.
-    params = {
-        "keyword": keyword,
-        "country": "ID",
-        "locationName": location if location and location != "Indonesia" else "All Cities/Provinces",
-    }
-    query_string = "&".join(f"{k}={v.replace(' ', '%20').replace('/', '%2F')}" for k, v in params.items() if v)
-    url = f"{base_url}?{query_string}" if query_string else base_url
-
-    headers = {
-        "Referer": GLINTS_HOMEPAGE,
-        "Sec-Fetch-Site": "same-origin",
-    }
-
-    resp = _request_with_retry(session, "GET", url, headers=headers)
-    if resp.status_code != 200:
-        log.error("❌ Glints tetap %s setelah retry+warm-up.", resp.status_code)
-        return []
-
-    soup = BeautifulSoup(resp.text, "html.parser")
-    links = soup.find_all("a", href=GLINTS_JOB_LINK_RE)
-    seen_ids = set()
-    hasil = []
-
-    for a in links:
-        info = _extract_glints_card_info(a, soup)
-        if not info or info["_job_id"] in seen_ids:
-            continue
-        seen_ids.add(info["_job_id"])
-        info.pop("_job_id", None)
-        hasil.append(info)
-        if len(hasil) >= limit:
-            break
-
-    return hasil
-
-
-def _scrape_glints_via_playwright(keyword: str, location: str, limit: int) -> list[dict]:
-    """Fallback kalau HTML statis tidak cukup (Cloudflare JS challenge)."""
-    try:
-        from playwright.sync_api import sync_playwright
-    except ImportError:
-        log.info("  (Playwright tidak terpasang — lewati fallback. `pip install playwright` untuk mengaktifkan.)")
-        return []
-
-    base_url = "https://glints.com/id/opportunities/jobs/explore"
-    params = {
-        "keyword": keyword,
-        "country": "ID",
-        "locationName": location if location and location != "Indonesia" else "All Cities/Provinces",
-    }
-    query_string = "&".join(f"{k}={v.replace(' ', '%20').replace('/', '%2F')}" for k, v in params.items() if v)
-    url = f"{base_url}?{query_string}" if query_string else base_url
-
-    hasil = []
-    with sync_playwright() as p:
-        browser = p.chromium.launch(headless=True)
-        page = browser.new_page(user_agent=(
-            "Mozilla/5.0 (Windows NT 10.0; Win64; x64) AppleWebKit/537.36 "
-            "(KHTML, like Gecko) Chrome/124.0.0.0 Safari/537.36"
-        ))
-        try:
-            page.goto(url, timeout=30000)
-            page.wait_for_timeout(3000)  # beri waktu render + lolos challenge
-            html = page.content()
-        except Exception as e:
-            log.error("❌ Playwright gagal render Glints: %s", e)
-            browser.close()
-            return hasil
-        browser.close()
-
-    soup = BeautifulSoup(html, "html.parser")
-    links = soup.find_all("a", href=GLINTS_JOB_LINK_RE)
-    seen_ids = set()
-    for a in links:
-        info = _extract_glints_card_info(a, soup)
-        if not info or info["_job_id"] in seen_ids:
-            continue
-        seen_ids.add(info["_job_id"])
-        info.pop("_job_id", None)
-        hasil.append(info)
-        if len(hasil) >= limit:
-            break
-    return hasil
-
-
-def scrape_glints(keyword: str = "", location: str = "Indonesia", limit: int = 10) -> list[dict]:
-    log.info("Mencari lowongan di Glints...")
-    hasil = _scrape_glints_via_html(keyword, location, limit)
-
-    if not hasil:
-        log.info("  HTML statis kosong/diblokir, coba fallback Playwright...")
-        hasil = _scrape_glints_via_playwright(keyword, location, limit)
-
-    if not hasil:
-        log.warning("⚠️ 0 lowongan Glints ditemukan (kemungkinan Cloudflare menahan request ini).")
-
-    return hasil
-
-
-# ==========================================
-# SCRAPER: JOBSTREET INDONESIA (chalice-search API — SEEK network)
-# ==========================================
-JOBSTREET_API = "https://id.jobstreet.com/api/chalice-search/v4/search"
-JOBSTREET_JOB_URL = "https://id.jobstreet.com/job/{id}"
-
-
-def scrape_jobstreet(keyword: str = "software engineer", location: str = "Indonesia", limit: int = 10) -> list[dict]:
-    log.info("Mencari lowongan di JobStreet Indonesia...")
-    hasil = []
-
-    impersonate = _random_impersonate()
-    session = _warm_up_session("https://id.jobstreet.com/", impersonate)
-
-    params = {
-        "siteKey": "ID-Main",
-        "sourcesystem": "houston",
-        "keywords": keyword,
-        "where": location,
-        "page": 1,
-        "pageSize": min(limit, 32),
-    }
-    headers = {"Accept": "application/json", "Referer": "https://id.jobstreet.com/"}
-
-    try:
-        resp = _request_with_retry(session, "GET", JOBSTREET_API, params=params, headers=headers)
-        resp.raise_for_status()
-        data = resp.json()
-    except Exception as e:
-        log.error("❌ Gagal fetch JobStreet: %s", e)
-        return hasil
-
-    for job in data.get("data", [])[:limit]:
-        job_id = job.get("id")
-        judul = job.get("title")
-        if not judul or not job_id:
-            continue
-
-        perusahaan = (job.get("advertiser") or {}).get("description") or "Tidak diketahui"
-        lokasi_list = [loc.get("label") for loc in job.get("locations", []) if loc.get("label")]
-        lokasi = ", ".join(lokasi_list) if lokasi_list else location
-
-        salary = job.get("salary") or {}
-        gaji = None
-        if salary.get("label"):
-            gaji = salary["label"]
-
-        tipe = "unknown"
-        work_types = job.get("workTypes") or []
-        if work_types:
-            wt = work_types[0].lower()
-            if "full" in wt:
-                tipe = "full-time"
-            elif "part" in wt:
-                tipe = "part-time"
-            elif "contract" in wt or "temp" in wt:
-                tipe = "kontrak"
-            elif "intern" in wt or "casual" in wt:
-                tipe = "magang"
-
-        hasil.append({
-            "judul": judul,
-            "perusahaan": perusahaan,
-            "lokasi": lokasi,
-            "tipe_kerja": tipe,
-            "kategori": (job.get("classifications") or [{}])[0].get("classification", {}).get("description"),
-            "deskripsi": job.get("teaser") or "",
-            "gaji": gaji,
-            "sumber_platform": "jobstreet",
-            "sumber_url": JOBSTREET_JOB_URL.format(id=job_id),
-            "tanggal_post": _parse_iso_date(job.get("listingDate")),
         })
 
     return hasil
@@ -1004,7 +713,6 @@ def scrape_weworkremotely(limit: int = 10) -> list[dict]:
 # SCRAPER GENERIK: GREENHOUSE & LEVER (ATS publik yang dipakai banyak
 # startup untuk memajang lowongan di careers page mereka sendiri)
 # ==========================================
-# Ini yang paling dekat dengan permintaan "tembus web company masing-masing":
 # Greenhouse & Lever adalah penyedia ATS yang API job-board-nya memang publik
 # dan tanpa proteksi bot berat (dirancang untuk ditempel di website company).
 # Isi daftar di bawah dengan board_token/company_slug perusahaan yang kamu
@@ -1479,14 +1187,13 @@ def scrape_dealls(path: str | None = None, limit: int = 20, daftar_path: list[st
 # ==========================================
 # SCRAPER: JOOBLE (API JSON resmi, job aggregator lintas-sumber)
 # ==========================================
-# Dipakai sebagai pengganti "Indeed" yang diminta: Indeed sendiri TIDAK
-# discrape langsung karena proteksi anti-bot kelas berat (Cloudflare/
-# DataDome + captcha interstitial) dan ToS-nya melarang scraping otomatis,
-# jadi scraper requests/HTML biasa akan sangat tidak stabil dan berisiko
-# IP kena blokir permanen. Jooble adalah job aggregator resmi (mengumpulkan
-# listing dari ribuan situs, termasuk banyak yang juga tayang di Indeed)
-# dengan REST API gratis & resmi -- jauh lebih stabil untuk dijalankan
-# dari server/cloud.
+# Dipakai sebagai pengganti "Indeed": Indeed sendiri TIDAK discrape langsung
+# karena proteksi anti-bot kelas berat (Cloudflare/DataDome + captcha
+# interstitial) dan ToS-nya melarang scraping otomatis, jadi scraper
+# requests/HTML biasa akan sangat tidak stabil dan berisiko IP kena blokir
+# permanen. Jooble adalah job aggregator resmi (mengumpulkan listing dari
+# ribuan situs, termasuk banyak yang juga tayang di Indeed) dengan REST API
+# gratis & resmi -- jauh lebih stabil untuk dijalankan dari server/cloud.
 #
 # Cara dapat API key (gratis): daftar di https://jooble.org/api/about,
 # lalu set sebagai environment variable:
@@ -1624,97 +1331,6 @@ def scrape_linkedin(keyword: str = "software engineer", location: str = "Indones
     return hasil[:limit]
 
 
-# ==========================================
-# SCRAPER: TALENTICS (MULTI‑URL + FALLBACK LINKEDIN) — tidak berubah
-# ==========================================
-TALENTICS_CAREER_URLS = [
-    "https://talentics.id/careers",
-    "https://talentics.id/karir",
-    "https://talentics.id/jobs",
-    "https://talentics.recruitee.com",
-]
-
-
-def scrape_talentics_direct(url: str, limit: int = 10) -> list[dict]:
-    log.info("  Mencoba URL: %s", url)
-    try:
-        resp = requests.get(url, impersonate=_random_impersonate(), timeout=10)
-        if resp.status_code != 200:
-            return []
-        soup = BeautifulSoup(resp.text, "html.parser")
-        links = soup.find_all("a", href=True)
-        results = []
-        for a in links:
-            href = a["href"]
-            teks = a.get_text(strip=True)
-            if not teks or len(teks) < 5:
-                continue
-            if any(k in href.lower() for k in ["job", "career", "loker", "position"]):
-                full_url = href if href.startswith("http") else url.rstrip("/") + "/" + href.lstrip("/")
-                container = a.find_parent("div") or a.find_parent("li")
-                teks_card = container.get_text(" ", strip=True) if container else teks
-
-                lokasi = "Tidak diketahui"
-                loc_match = re.search(r'(Jakarta|Bandung|Surabaya|Yogyakarta|Remote|Indonesia)', teks_card, re.I)
-                if loc_match:
-                    lokasi = loc_match.group(1)
-
-                gaji = _parse_gaji_dari_teks(teks_card)
-                tipe = "unknown"
-                if "full" in teks_card.lower():
-                    tipe = "full-time"
-                elif "part" in teks_card.lower():
-                    tipe = "part-time"
-                elif "contract" in teks_card.lower() or "kontrak" in teks_card.lower():
-                    tipe = "kontrak"
-                elif "intern" in teks_card.lower() or "magang" in teks_card.lower():
-                    tipe = "magang"
-
-                results.append({
-                    "judul": teks,
-                    "perusahaan": "Talentics",
-                    "lokasi": lokasi,
-                    "tipe_kerja": tipe,
-                    "kategori": None,
-                    "deskripsi": "",
-                    "gaji": gaji,
-                    "sumber_platform": "talentics",
-                    "sumber_url": full_url,
-                    "tanggal_post": date.today().isoformat(),
-                })
-                if len(results) >= limit:
-                    break
-        return results
-    except Exception:
-        return []
-
-
-def scrape_talentics(limit: int = 20) -> list[dict]:
-    """
-    NB: Talentics di sini adalah halaman karir SATU perusahaan (bukan job
-    board multi-perusahaan seperti sumber lain), jadi hasilnya dibatasi oleh
-    berapa banyak posisi yang sedang benar-benar dibuka perusahaan tsb —
-    menaikkan `limit` tidak akan memaksa jadi 20 kalau lowongan bukanya
-    memang cuma segelintir. Kalau maksudmu "Talentics" itu nama job board
-    lain yang beda, kasih tahu URL-nya dan saya sesuaikan.
-    """
-    log.info("Mencari lowongan Talentics...")
-    for url in TALENTICS_CAREER_URLS:
-        hasil = scrape_talentics_direct(url, limit)
-        if hasil:
-            log.info("  Berhasil dari %s (%d lowongan tersedia di halaman karir ini)", url, len(hasil))
-            return hasil
-    log.info("  Tidak ditemukan halaman karir langsung. Fallback ke LinkedIn...")
-    linkedin_jobs = scrape_linkedin(keyword="Talentics", location="Indonesia", limit=limit * 2)
-    talentics_jobs = [j for j in linkedin_jobs if "talentics" in j["perusahaan"].lower()]
-    if not talentics_jobs:
-        log.warning("  ⚠️ Tidak ada lowongan Talentics di LinkedIn saat ini.")
-    else:
-        for job in talentics_jobs:
-            job["sumber_platform"] = "talentics"
-    return talentics_jobs[:limit]
-
-
 def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "debug_page.html"):
     if use_browser:
         from playwright.sync_api import sync_playwright
@@ -1742,17 +1358,43 @@ def debug_page_structure(url: str, use_browser: bool = False, save_to: str = "de
 # AGGREGATOR UTAMA
 # ==========================================
 # Kata kunci dipakai untuk pass kedua khusus magang di sumber-sumber yang
-# mendukung pencarian keyword (JobStreet, LinkedIn, RemoteOK, Arbeitnow,
-# Remotive, Jobicy, Himalayas, Jooble). Ini penting karena keyword utama
-# biasanya "software engineer" dkk yang jarang menangkap lowongan magang —
-# tanpa pass kedua ini, magang cuma kebagian sisa dari deteksi teks pasif.
+# mendukung pencarian keyword (LinkedIn, RemoteOK, Arbeitnow, Remotive,
+# Jobicy, Himalayas, Jooble). Ini penting karena keyword utama biasanya
+# "software engineer" dkk yang jarang menangkap lowongan magang — tanpa
+# pass kedua ini, magang cuma kebagian sisa dari deteksi teks pasif.
 KEYWORD_MAGANG_DEFAULT = "magang internship"
 
 
+DAFTAR_KEYWORD_LINKEDIN = [
+    # Teknologi & Data
+    "software engineer", "data analyst", "data engineer", "ui ux designer", 
+    "product manager", "it support", "system administrator",
+    
+    # Keuangan (Finance) & Akuntansi
+    "finance", "accounting", "tax", "auditor", "financial analyst", 
+    "account payable", "account receivable",
+    
+    # Operasional, Lapangan & Administrasi
+    "operator", "operator produksi", "admin", "data entry", "supply chain", 
+    "logistics", "warehouse", "quality control", "quality assurance",
+    
+    # Pemasaran (Marketing) & Penjualan
+    "marketing", "digital marketing", "social media specialist", "sales", 
+    "business development", "key account manager",
+    
+    # HR & Manajemen
+    "human resources", "recruiter", "talent acquisition", "management trainee", 
+    "project manager",
+    
+    # Layanan Pelanggan & Lainnya
+    "customer service", "telesales", "technician", "mechanical engineer"
+]
+
 def scrape_semua_sumber(
-    limit_per_sumber: int = 40,
-    limit_magang_per_sumber: int = 20,
-    keyword_linkedin: str = "software engineer",
+    limit_per_sumber: int = 50,
+    limit_magang_per_sumber: int = 30,
+    # Jadikan variabel DAFTAR_KEYWORD_LINKEDIN sebagai nilai default
+    keywords_linkedin: list[str] = DAFTAR_KEYWORD_LINKEDIN,
     keyword_magang: str = KEYWORD_MAGANG_DEFAULT,
     limits: dict | None = None,
     sertakan_ats: bool = True,
@@ -1762,9 +1404,7 @@ def scrape_semua_sumber(
     """
     Mengumpulkan lowongan dari semua sumber, lalu:
       1. Menjalankan pass tambahan khusus keyword magang/internship di
-         sumber-sumber yang mendukung pencarian keyword, supaya total pool
-         cukup besar untuk menghasilkan ~100 lowongan gabungan (reguler +
-         magang) sekali jalan — bukan cuma ~20an seperti versi lama.
+         sumber-sumber yang mendukung pencarian keyword.
       2. Klasifikasi ulang tipe_kerja (`pasca_proses`) supaya magang yang
          "nyelip" di sumber tanpa keyword magang tetap terdeteksi dari teks.
       3. Filter rentang tanggal posting (default 30 hari terakhir) supaya
@@ -1791,12 +1431,6 @@ def scrape_semua_sumber(
     safe_extend(scrape_karir_com, "karir.com", limit=limits.get("karir.com", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    safe_extend(scrape_glints, "glints", keyword="", limit=limits.get("glints", limit_per_sumber))
-    time.sleep(random.uniform(0.8, 1.5))
-
-    safe_extend(scrape_jobstreet, "jobstreet", keyword=keyword_linkedin, limit=limits.get("jobstreet", limit_per_sumber))
-    time.sleep(random.uniform(0.8, 1.5))
-
     safe_extend(scrape_linkedin, "linkedin", keyword=keyword_linkedin, limit=limits.get("linkedin", max(limit_per_sumber, 40)))
     time.sleep(random.uniform(0.8, 1.5))
 
@@ -1804,9 +1438,6 @@ def scrape_semua_sumber(
     time.sleep(random.uniform(0.8, 1.5))
 
     safe_extend(scrape_dealls, "dealls", limit=limits.get("dealls", limit_per_sumber))
-    time.sleep(random.uniform(0.8, 1.5))
-
-    safe_extend(scrape_talentics, "talentics", limit=limits.get("talentics", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
     safe_extend(scrape_jooble, "jooble", keyword=keyword_linkedin, location="Indonesia", limit=limits.get("jooble", limit_per_sumber))
@@ -1837,13 +1468,10 @@ def scrape_semua_sumber(
 
     # ---------- PASS 2: keyword magang/internship khusus ----------
     # Sumber yang tidak mendukung pencarian keyword (Karir.com, Kalibrr
-    # generik, Talentics) dilewati di sini — magang dari sana tetap
-    # tertangkap lewat deteksi teks di `pasca_proses`.
+    # generik) dilewati di sini — magang dari sana tetap tertangkap lewat
+    # deteksi teks di `pasca_proses`.
     if sertakan_pass_magang:
         log.info("  -- Pass tambahan: keyword magang/internship --")
-
-        safe_extend(scrape_jobstreet, "jobstreet(magang)", keyword=keyword_magang, limit=limit_magang_per_sumber)
-        time.sleep(random.uniform(0.8, 1.5))
 
         safe_extend(scrape_linkedin, "linkedin(magang)", keyword="magang internship", limit=limit_magang_per_sumber)
         time.sleep(random.uniform(0.8, 1.5))
