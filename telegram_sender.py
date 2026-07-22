@@ -84,12 +84,7 @@ def format_pesan(
     nomor_awal: int = 1,
     bagian: tuple[int, int] | None = None,
 ) -> str:
-    """
-    `nomor_awal`: nomor urut item pertama di pesan ini (dipakai saat pesan
-    dipecah jadi beberapa bagian supaya penomoran tetap berlanjut).
-    `bagian`: (bagian_ke, total_bagian) — kalau diisi, ditampilkan di header
-    supaya penerima tahu ini pesan bagian keberapa.
-    """
+    
     if not lowongan_list:
         return ""
 
@@ -104,7 +99,15 @@ def format_pesan(
     for offset, lo in enumerate(lowongan_list):
         baris.append(_format_satu_item(nomor_awal + offset, lo))
 
-    baris.append(FOOTER_PESAN)
+    # Cek apakah ini bagian terakhir (atau tidak dipecah sama sekali)
+    is_bagian_terakhir = not bagian or (bagian[0] == bagian[1])
+    
+    if is_bagian_terakhir:
+        # Munculkan promosi lengkap TraKerja di bagian paling akhir
+        baris.append(FOOTER_PESAN)
+    else:
+        # Jika masih ada bagian selanjutnya, beri footer pemisah sederhana
+        baris.append("━━━━━━━━━━━━━━\n_Bersambung ke bagian selanjutnya..._")
 
     return "\n".join(baris)
 
