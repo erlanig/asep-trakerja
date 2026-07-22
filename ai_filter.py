@@ -4,14 +4,18 @@ Modul untuk memproses data mentah hasil scraping menggunakan OpenAI:
 - Mengkategorikan lowongan
 - Memilih lowongan terbaik tanpa membuang terlalu banyak data
 
-Versi dengan pemrosesan chunk paralel (async) agar lebih cepat.
+Versi dengan pemrosesan chunk paralel (async) agar lebih cepat, DITAMBAH
+retry otomatis untuk error transient (mis. "Connection error") supaya satu
+chunk yang gagal karena gangguan jaringan sesaat tidak langsung membuang
+semua item di dalamnya.
 """
 
 import os
 import json
 import math
 import asyncio
-from openai import AsyncOpenAI
+import random
+from openai import AsyncOpenAI, APIConnectionError, APITimeoutError, RateLimitError, InternalServerError
 from dotenv import load_dotenv
 
 load_dotenv()
@@ -28,9 +32,23 @@ UKURAN_CHUNK = 20
 
 # Estimasi token output per item (judul+deskripsi ringkas+field lain).
 # Dipakai untuk menghitung max_tokens per chunk secara dinamis supaya
-# tidak mepet/terpotong.
-TOKEN_PER_ITEM_ESTIMASI = 220
-TOKEN_BUFFER = 500
+# tidak mepet/terpotong. Deskripsi input dipangkas sampai 500 karakter
+# (~150-200 token) dan model sering mengembalikannya hampir utuh, jadi
+# estimasi lama (220) terlalu mepet -- output kepotong (finish_reason=
+# "length") bikin JSON tidak valid dan SATU CHUNK PENUH (20 item) ikut
+# terbuang. Dinaikkan supaya ada ruang lebih aman.
+TOKEN_PER_ITEM_ESTIMASI = 350
+TOKEN_BUFFER = 800
+
+# Retry untuk error TRANSIENT saja (koneksi putus, timeout, rate limit,
+# error 5xx dari OpenAI) -- bukan untuk error permanen seperti JSON tidak
+# valid atau format hasil tidak terduga (itu masalah konten, retry tidak
+# akan membantu dan cuma buang waktu/biaya).
+MAX_RETRY_CHUNK = 3
+RETRY_BASE_DELAY = 2  # detik, dengan exponential backoff + jitter
+
+# Exception yang dianggap transient dan layak di-retry.
+ERROR_TRANSIENT = (APIConnectionError, APITimeoutError, RateLimitError, InternalServerError)
 
 FIELD_WAJIB = [
     "judul", "perusahaan", "lokasi", "tipe_kerja",
@@ -58,11 +76,50 @@ def _lengkapi_field(item: dict) -> dict:
     return item
 
 
+async def _panggil_openai_dengan_retry(chunk: list[dict], input_data: str, system_prompt: str, max_tokens_chunk: int):
+    """
+    Panggil OpenAI dengan retry otomatis KHUSUS untuk error transient
+    (connection error, timeout, rate limit, 5xx). Exponential backoff +
+    jitter supaya tidak membanjiri API saat sedang bermasalah.
+    """
+    percobaan_terakhir_exc = None
+
+    for percobaan in range(1, MAX_RETRY_CHUNK + 1):
+        try:
+            return await client.chat.completions.create(
+                model=MODEL,
+                messages=[
+                    {"role": "system", "content": system_prompt},
+                    {"role": "user", "content": input_data},
+                ],
+                temperature=0.2,
+                max_tokens=max_tokens_chunk,
+                response_format={"type": "json_object"},
+            )
+        except ERROR_TRANSIENT as e:
+            percobaan_terakhir_exc = e
+            if percobaan < MAX_RETRY_CHUNK:
+                delay = (RETRY_BASE_DELAY * (2 ** (percobaan - 1))) + random.uniform(0.3, 1.0)
+                print(
+                    f"⚠️ {type(e).__name__} untuk chunk ({len(chunk)} item), "
+                    f"percobaan {percobaan}/{MAX_RETRY_CHUNK}, retry dalam {delay:.1f}s..."
+                )
+                await asyncio.sleep(delay)
+            else:
+                print(
+                    f"❌ Chunk ({len(chunk)} item) tetap gagal setelah "
+                    f"{MAX_RETRY_CHUNK} percobaan: {e}"
+                )
+
+    raise percobaan_terakhir_exc
+
+
 async def _proses_chunk_async(chunk: list[dict]) -> list[dict]:
     """
     Kirim satu chunk ke OpenAI secara asynchronous untuk dibersihkan.
-    Kalau chunk ini gagal (error API / JSON tidak valid), kembalikan list
-    kosong HANYA untuk chunk ini -- bukan menghapus seluruh hasil.
+    Kalau chunk ini gagal (error API / JSON tidak valid) setelah retry,
+    kembalikan list kosong HANYA untuk chunk ini -- bukan menghapus
+    seluruh hasil.
     """
     if not chunk:
         return []
@@ -121,16 +178,7 @@ full-time, part-time, remote, kontrak, magang
 
     response = None
     try:
-        response = await client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": system_prompt},
-                {"role": "user", "content": input_data},
-            ],
-            temperature=0.2,
-            max_tokens=max_tokens_chunk,
-            response_format={"type": "json_object"},
-        )
+        response = await _panggil_openai_dengan_retry(chunk, input_data, system_prompt, max_tokens_chunk)
 
         finish_reason = response.choices[0].finish_reason
         hasil_teks = response.choices[0].message.content.strip()
@@ -165,7 +213,7 @@ full-time, part-time, remote, kontrak, magang
         return []
 
     except Exception as e:
-        print(f"❌ Error OpenAI untuk 1 chunk ({len(chunk)} item): {e}")
+        print(f"❌ Error OpenAI untuk 1 chunk ({len(chunk)} item) setelah retry: {e}")
         return []
 
 
