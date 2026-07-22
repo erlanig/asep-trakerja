@@ -126,6 +126,20 @@ def _kirim_satu_pesan(chat_id: str, teks: str, message_thread_id: int | None = N
         resp = requests.post(API_URL, json=payload, timeout=15)
         data = resp.json()
         if not data.get("ok"):
+            deskripsi = data.get("description", "")
+            # Kalau topic tujuan sudah ditutup/dihapus, coba kirim ulang
+            # tanpa message_thread_id (jatuh ke topic General) supaya
+            # pesan tetap sampai, bukan hilang begitu saja.
+            if message_thread_id and any(k in deskripsi for k in ("TOPIC_CLOSED", "TOPIC_DELETED", "thread not found")):
+                print(f"⚠️  Topic {message_thread_id} tidak bisa dipakai di {chat_id} ({deskripsi}), fallback ke General")
+                payload_fallback = {**payload}
+                payload_fallback.pop("message_thread_id", None)
+                resp = requests.post(API_URL, json=payload_fallback, timeout=15)
+                data = resp.json()
+                if not data.get("ok"):
+                    print(f"❌ Gagal kirim ke {chat_id} (fallback General): {data}")
+                    return False
+                return True
             print(f"❌ Gagal kirim ke {chat_id}: {data}")
             return False
         return True

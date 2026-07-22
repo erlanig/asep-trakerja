@@ -133,6 +133,13 @@ def main():
 
     id_terkirim = [lo["id"] for lo in reguler_untuk_kirim] + [lo["id"] for lo in magang_untuk_kirim]
 
+    # Lacak sukses/gagal PER KELOMPOK (reguler/magang) di seluruh grup,
+    # supaya lowongan yang gagal terkirim ke semua grup tidak ikut ditandai
+    # 'terkirim' di DB (kalau ditandai walau gagal, lowongan itu hilang
+    # permanen dari antrian dan tidak pernah dicoba kirim ulang).
+    reguler_sukses_ke_semua_grup = bool(reguler_untuk_kirim)
+    magang_sukses_ke_semua_grup = bool(magang_untuk_kirim)
+
     for grup in grup_list:
         hasil_per_kelompok = []
 
@@ -144,6 +151,7 @@ def main():
                 judul_pesan=telegram_sender.JUDUL_DEFAULT_REGULER,
             )
             hasil_per_kelompok.append(("reguler", len(reguler_untuk_kirim), sukses_reguler))
+            reguler_sukses_ke_semua_grup = reguler_sukses_ke_semua_grup and sukses_reguler
 
         if magang_untuk_kirim:
             sukses_magang = telegram_sender.kirim_ke_grup(
@@ -153,6 +161,7 @@ def main():
                 judul_pesan=telegram_sender.JUDUL_DEFAULT_MAGANG,
             )
             hasil_per_kelompok.append(("magang", len(magang_untuk_kirim), sukses_magang))
+            magang_sukses_ke_semua_grup = magang_sukses_ke_semua_grup and sukses_magang
 
         semua_sukses = all(sukses for _, _, sukses in hasil_per_kelompok)
         status = "sukses" if semua_sukses else "sebagian gagal"
@@ -166,8 +175,23 @@ def main():
         )
         print(f"    → {grup['nama_grup']}: {status} ({ringkasan})")
 
-    # Tandai semua lowongan yang baru dikirim sebagai 'terkirim'
-    db.tandai_terkirim(id_terkirim)
+    # Hanya tandai 'terkirim' untuk kelompok yang BENAR-BENAR berhasil
+    # terkirim ke semua grup. Kelompok yang gagal (mis. TOPIC_CLOSED)
+    # dibiarkan berstatus 'belum' supaya otomatis dicoba lagi di run
+    # berikutnya, bukan hilang begitu saja.
+    id_ditandai = []
+    if reguler_sukses_ke_semua_grup:
+        id_ditandai += [lo["id"] for lo in reguler_untuk_kirim]
+    if magang_sukses_ke_semua_grup:
+        id_ditandai += [lo["id"] for lo in magang_untuk_kirim]
+
+    if id_ditandai:
+        db.tandai_terkirim(id_ditandai)
+
+    id_gagal = [i for i in id_terkirim if i not in id_ditandai]
+    if id_gagal:
+        print(f"    ⚠️  {len(id_gagal)} lowongan GAGAL terkirim ke semua grup, "
+              f"dibiarkan 'belum' untuk dicoba lagi di run berikutnya: {id_gagal}")
 
     print("\n✅ Pipeline selesai.")
 
