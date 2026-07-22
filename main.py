@@ -16,7 +16,8 @@ Versi ini memisahkan lowongan REGULER dan MAGANG sepanjang pipeline:
      untuk magang).
   4. Disimpan ke DB seperti biasa (dedup otomatis via UNIQUE sumber_url).
   5. Dikirim ke tiap grup Telegram sebagai maksimal 2 pesan terpisah:
-     "Info Lowongan Kerja Hari Ini" dan "Info Lowongan Magang Hari Ini".
+     "Info Lowongan Kerja Hari Ini" dan "Info Lowongan Magang Hari Ini",
+     ke topic TOPIC_ID_INFO_LOWONGAN (bukan topic General).
      Kalau salah satu kelompok kosong, pesan untuk kelompok itu dilewati.
      Tiap pesan otomatis dipecah lagi kalau kepanjangan (lihat
      telegram_sender.kirim_ke_grup).
@@ -24,7 +25,7 @@ Versi ini memisahkan lowongan REGULER dan MAGANG sepanjang pipeline:
 Jalankan manual untuk test:
     python main.py
 
-Jalankan otomatis via cron jam 15:00 setiap hari (lihat README.md untuk setup cron).
+Jalankan otomatis via cron jam 15:30 setiap hari (lihat README.md untuk setup cron).
 """
 
 import os
@@ -53,6 +54,13 @@ LIMIT_MAGANG_PER_SUMBER = int(os.getenv("SCRAPER_LIMIT_MAGANG_PER_SUMBER", 20))
 # scraper._dalam_rentang_hari soal kenapa ini dipakai sebagai proxy untuk
 # "belum tutup", karena kebanyakan sumber publik tidak expose tanggal tutup.
 HARI_RENTANG = int(os.getenv("SCRAPER_HARI_RENTANG", 30))
+
+# Topic tujuan di grup Telegram untuk pengiriman lowongan.
+# 6 = topic "Informasi Lowongan Kerja" di grup Komunitas Trakerja.
+# NB: ini konstanta global (satu topic untuk semua grup di grup_list).
+# Kalau nanti ada grup lain dengan topic berbeda, idealnya kolom topic_id
+# ditambahkan ke tabel grup_telegram dan dibaca per-grup di sini.
+TOPIC_ID_INFO_LOWONGAN = int(os.getenv("TELEGRAM_TOPIC_ID_INFO_LOWONGAN", 6))
 
 
 def main():
@@ -107,7 +115,8 @@ def main():
     print(f"    → {berhasil_simpan} lowongan baru disimpan (sisanya kemungkinan duplikat)")
 
     # 4. Ambil lowongan yang belum terkirim dari DB (dipisah per kelompok),
-    #    lalu kirim ke semua grup aktif sebagai maksimal 2 pesan per grup.
+    #    lalu kirim ke semua grup aktif sebagai maksimal 2 pesan per grup,
+    #    ke topic "Informasi Lowongan Kerja" (bukan topic General).
     print("\n[4/4] Mengirim ke grup Telegram...")
 
     reguler_untuk_kirim = db.ambil_lowongan_belum_kirim(limit=JUMLAH_REGULER_PER_HARI, tipe_kerja="!magang")
@@ -131,6 +140,7 @@ def main():
             sukses_reguler = telegram_sender.kirim_ke_grup(
                 chat_id=grup["chat_id"],
                 lowongan_list=reguler_untuk_kirim,
+                message_thread_id=TOPIC_ID_INFO_LOWONGAN,
                 judul_pesan=telegram_sender.JUDUL_DEFAULT_REGULER,
             )
             hasil_per_kelompok.append(("reguler", len(reguler_untuk_kirim), sukses_reguler))
@@ -139,6 +149,7 @@ def main():
             sukses_magang = telegram_sender.kirim_ke_grup(
                 chat_id=grup["chat_id"],
                 lowongan_list=magang_untuk_kirim,
+                message_thread_id=TOPIC_ID_INFO_LOWONGAN,
                 judul_pesan=telegram_sender.JUDUL_DEFAULT_MAGANG,
             )
             hasil_per_kelompok.append(("magang", len(magang_untuk_kirim), sukses_magang))
