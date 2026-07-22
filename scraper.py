@@ -1431,11 +1431,16 @@ def scrape_semua_sumber(
     safe_extend(scrape_karir_com, "karir.com", limit=limits.get("karir.com", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    # 1. Looping untuk scrape LinkedIn berdasarkan banyak keyword
-    for kw in keywords_linkedin:
-        # Gunakan 'kw' sebagai keyword
+    # --- BAGIAN YANG DIUBAH ---
+    # Pilih 2 keyword secara acak dari daftar DAFTAR_KEYWORD_LINKEDIN
+    # Kamu bisa ubah angka 2 menjadi 3 atau 1 sesuai kebutuhan
+    keyword_acak = random.sample(keywords_linkedin, 2)
+    log.info(f"🎯 Keyword acak yang terpilih sesi ini: {keyword_acak}")
+
+    # 1. Scrape LinkedIn HANYA untuk keyword yang terpilih acak
+    for kw in keyword_acak:
         safe_extend(scrape_linkedin, f"linkedin ({kw})", keyword=kw, limit=limits.get("linkedin", max(limit_per_sumber, 40)))
-        time.sleep(random.uniform(1.0, 2.0)) # Jeda sedikit dinaikkan agar aman dari blokir LinkedIn
+        time.sleep(random.uniform(1.0, 2.0))
 
     safe_extend(scrape_kalibrr, "kalibrr", limit=limits.get("kalibrr", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
@@ -1443,8 +1448,8 @@ def scrape_semua_sumber(
     safe_extend(scrape_dealls, "dealls", limit=limits.get("dealls", limit_per_sumber))
     time.sleep(random.uniform(0.8, 1.5))
 
-    # 2. Looping untuk scrape Jooble (karena sebelumnya juga bergantung pada keyword_linkedin)
-    for kw in keywords_linkedin:
+    # 2. Scrape Jooble HANYA untuk keyword yang terpilih acak
+    for kw in keyword_acak:
         safe_extend(scrape_jooble, f"jooble ({kw})", keyword=kw, location="Indonesia", limit=limits.get("jooble", limit_per_sumber))
         time.sleep(random.uniform(0.8, 1.5))
 
