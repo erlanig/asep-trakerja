@@ -37,20 +37,11 @@ def _format_satu_item(nomor: int, lo: dict) -> str:
     )
 
 
-# --- BAGIAN YANG DIPERBARUI ---
 FOOTER_PESAN = (
-    "━━━━━━━━━━━━━━\n"
-    "💡 *Tingkatkan Peluang Karirmu!*\n"
-    "Kunjungi [www.trakerja.com](https://www.trakerja.com) untuk:\n"
-    "✨ Job Tracking\n"
-    "✨ Buat CV ATS\n"
-    "✨ AI CV Analyzer\n"
-    "✨ Cover Letter Generator\n"
     "━━━━━━━━━━━━━━\n"
     "_🤖 Asep TraKerja • Info lowongan otomatis_\n"
     "_#ForABetterLife_"
 )
-# ------------------------------
 
 
 def _bagi_menjadi_chunk(lowongan_list: list[dict], batas_karakter: int = BATAS_AMAN_KARAKTER) -> list[list[dict]]:
